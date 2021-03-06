@@ -1,13 +1,5 @@
 {
-    "r5.16xlarge": {
-        "tests": [
-            ""
-        ],
-        "env": {
-            "DEVICE": "cpu"
-        }
-    },
-    "g4dn.2xlarge": {
+    "g4dn.4xlarge": {
         "tests": [
             ""
         ],
