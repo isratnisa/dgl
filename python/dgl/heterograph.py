@@ -4780,6 +4780,44 @@ class DGLHeteroGraph(object):
             if apply_node_func is not None:
                 self.apply_nodes(apply_node_func, ALL, self.ntypes[dtid])
 
+
+    #################################################################
+    # New Message passing on heterograph // will replace *update_all
+    #################################################################
+    def update_all_new(self,
+                   mfunc,
+                   rfunc,
+                   afunc=None,
+                   etype=None):
+    # def update_all_new(self, mfunc, rfunc, afunc=None, etype=None):
+        """Send messages along all the edges, reduce them by first type-wisely
+        """
+        print("mfunc: ", mfunc, "rfunc: ", rfunc, "afunc: ", afunc)
+        all_out = [] #= defaultdict(list)
+        # merge_order = defaultdict(list)
+        # for etype, args in etype_dict.items():
+        #     etid = self.get_etype_id(etype)
+        #     _, dtid = self._graph.metagraph.find_edge(etid)
+        #     args = pad_tuple(args, 3)
+        #     if args is None:
+        #         raise DGLError('Invalid arguments for edge type "{}". Should be '
+        #                        '(msg_func, reduce_func, [apply_node_func])'.format(etype))
+        #     mfunc, rfunc, afunc = args
+        g = self #if etype is None else self[etype]
+
+            # all_out[dtid].append(core.message_passing(g, mfunc, rfunc, afunc))
+        all_out.append(core.message_passing(g, mfunc, rfunc, afunc))
+            
+            # merge_order[dtid].append(etid)  # use edge type id as merge order hint
+        # for dtid, frames in all_out.items():
+        #     # merge by cross_reducer
+        #     self._node_frames[dtid].update(
+        #         reduce_dict_data(frames, cross_reducer, merge_order[dtid]))
+        #     # apply
+        #     if apply_node_func is not None:
+        #         self.apply_nodes(apply_node_func, ALL, self.ntypes[dtid])
+
+
     #################################################################
     # Message propagation
     #################################################################

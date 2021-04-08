@@ -74,7 +74,7 @@ target_mapping = {
 }
 
 
-def _gspmm(gidx, op, reduce_op, u, e):
+def _gspmm(gidx, op, reduce_op, dict_u, e):
     r""" Generalized Sparse Matrix Multiplication interface. It takes the result of
     :attr:`op` on source node feature and edge feature, leads to a message on edge.
     Then aggregates the message by :attr:`reduce_op` on destination nodes.
@@ -115,8 +115,8 @@ def _gspmm(gidx, op, reduce_op, u, e):
     -----
     This function does not handle gradients.
     """
-    if gidx.number_of_etypes() != 1:
-        raise DGLError("We only support gspmm on graph with one edge type")
+    # if gidx.number_of_etypes() != 1:
+    #     raise DGLError("We only support gspmm on graph with one edge type")
     use_u = op != 'copy_rhs'
     use_e = op != 'copy_lhs'
     if use_u and use_e:
@@ -127,35 +127,44 @@ def _gspmm(gidx, op, reduce_op, u, e):
     # deal with scalar features.
     expand_u, expand_e = False, False
     if use_u:
-        if F.ndim(u) == 1:
-            u = F.unsqueeze(u, -1)
-            expand_u = True
+        for key in dict_u.keys():
+            u = dict_u[key]
+            if F.ndim(u) == 1:
+                u = F.unsqueeze(u, -1)
+                expand_u = True
     if use_e:
         if F.ndim(e) == 1:
             e = F.unsqueeze(e, -1)
             expand_e = True
 
-    ctx = F.context(u) if use_u else F.context(e)
-    dtype = F.dtype(u) if use_u else F.dtype(e)
-    u_shp = F.shape(u) if use_u else (0,)
-    e_shp = F.shape(e) if use_e else (0,)
-    _, dsttype = gidx.metagraph.find_edge(0)
-    v_shp = (gidx.number_of_nodes(dsttype), ) +\
-        infer_broadcast_shape(op, u_shp[1:], e_shp[1:])
-    v = F.zeros(v_shp, dtype, ctx)
-    use_cmp = reduce_op in ['max', 'min']
-    arg_u, arg_e = None, None
-    idtype = getattr(F, gidx.dtype)
-    if use_cmp:
-        if use_u:
-            arg_u = F.zeros(v_shp, idtype, ctx)
-        if use_e:
-            arg_e = F.zeros(v_shp, idtype, ctx)
-    arg_u_nd = to_dgl_nd_for_write(arg_u)
-    arg_e_nd = to_dgl_nd_for_write(arg_e)
+    # ctx = F.context(u) if use_u else F.context(e)
+    # dtype = F.dtype(u) if use_u else F.dtype(e)
+    # u_shp = F.shape(u) if use_u else (0,)
+    # e_shp = F.shape(e) if use_e else (0,)
+    # _, dsttype = gidx.metagraph.find_edge(0)
+    # v_shp = (gidx.number_of_nodes(dsttype), ) +\
+    #     infer_broadcast_shape(op, u_shp[1:], e_shp[1:])
+    # v = F.zeros(v_shp, dtype, ctx)
+    # use_cmp = reduce_op in ['max', 'min']
+    # arg_u, arg_e = None, None
+    # idtype = getattr(F, gidx.dtype)
+    # if use_cmp:
+    #     if use_u:
+    #         arg_u = F.zeros(v_shp, idtype, ctx)
+    #     if use_e:
+    #         arg_e = F.zeros(v_shp, idtype, ctx)
+    # arg_u_nd = to_dgl_nd_for_write(arg_u)
+    # arg_e_nd = to_dgl_nd_for_write(arg_e)
+
+    list_u = []
+    if use_u:
+        for key in dict_u.keys():
+            u = dict_u[key]
+            list_u.append(to_dgl_nd(u if use_u else None))
+            
     if gidx.number_of_edges(0) > 0:
-        _CAPI_DGLKernelSpMM(gidx, op, reduce_op,
-                            to_dgl_nd(u if use_u else None),
+        _CAPI_DGLKernelSpMMHetero(gidx, op, reduce_op,
+                            list_u,
                             to_dgl_nd(e if use_e else None),
                             to_dgl_nd_for_write(v),
                             arg_u_nd,

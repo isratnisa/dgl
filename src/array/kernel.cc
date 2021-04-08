@@ -235,6 +235,40 @@ DGL_REGISTER_GLOBAL("sparse._CAPI_DGLKernelSpMM")
     SpMM(op, reduce_op, graph.sptr(), U, E, V, {ArgU, ArgE});
   });
 
+DGL_REGISTER_GLOBAL("sparse._CAPI_DGLKernelSpMMHetero")
+.set_body([] (DGLArgs args, DGLRetValue* rv) {
+    HeteroGraphRef graph = args[0];
+    const std::string op = args[1];
+    const std::string reduce_op = args[2];
+    List<Value> list_U = args[3];
+    NDArray E = args[4];
+    NDArray V = args[5];
+    NDArray ArgU = args[6];
+    NDArray ArgE = args[7];
+    std::vector<NDArray> U_vec;
+    U_vec.reserve(list_U.size());
+    for (Value val : list_U) {
+      U_vec.push_back(val->data);
+    }
+    for (int i = 0; i < U_vec.size(); ++i){
+      CheckCtx(graph->Context(), {U_vec[i], E, V, ArgU, ArgE},
+          {"U_data", "E_data", "out", "Arg_U", "Arg_E"});
+      CheckContiguous({U_vec[i], E, V, ArgU, ArgE},
+          {"U_data", "E_data", "out", "Arg_U", "Arg_E"});
+      CHECK_EQ(graph->NumEdgeTypes(), 1);
+      auto pair = graph->meta_graph()->FindEdge(0);  // only one etype in the graph.
+      const dgl_type_t src_vtype = pair.first;
+      const dgl_type_t dst_vtype = pair.second;
+      CheckShape(
+          {graph->NumVertices(src_vtype), graph->NumEdges(0), graph->NumVertices(dst_vtype)},
+          {0, 1, 2, 2, 2},
+          {U_vec[0], E, V, ArgU, ArgE},
+          {"U_data", "E_data", "out", "Arg_U", "Arg_E"});
+    }
+    // SpMM(op, reduce_op, graph.sptr(), U, E, V, {ArgU, ArgE});
+  });
+
+
 DGL_REGISTER_GLOBAL("sparse._CAPI_DGLKernelSDDMM")
 .set_body([] (DGLArgs args, DGLRetValue* rv) {
     HeteroGraphRef graph = args[0];
