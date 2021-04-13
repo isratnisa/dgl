@@ -246,15 +246,19 @@ def invoke_gspmm(graph, mfunc, rfunc, *, srcdata=None, dstdata=None, edata=None)
     if dstdata is None:
         dstdata = graph.dstdata
     alldata = [srcdata, dstdata, edata]
-
+    print("srcdata : ", srcdata)
+    print("destdata : ", dstdata)
+    print("edata : ", edata)
     if isinstance(mfunc, fn.BinaryMessageFunction):
         x = alldata[mfunc.lhs][mfunc.lhs_field]
         y = alldata[mfunc.rhs][mfunc.rhs_field]
+        print("inside binary: ", x, y)
         op = getattr(ops, '{}_{}'.format(mfunc.name, rfunc.name))
         z = op(graph, x, y)
     else:
         x = alldata[mfunc.target][mfunc.in_field]
         op = getattr(ops, '{}_{}'.format(mfunc.name, rfunc.name))
+        print("outside binary else : ", x)
         z = op(graph, x)
     return {rfunc.out_field : z}
 
@@ -284,6 +288,7 @@ def message_passing(g, mfunc, rfunc, afunc):
     else:
         # invoke message passing in two separate steps
         # message phase
+
         if is_builtin(mfunc):
             msgdata = invoke_gsddmm(g, mfunc)
         else:

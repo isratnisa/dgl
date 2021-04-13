@@ -136,25 +136,33 @@ def _gspmm(gidx, op, reduce_op, dict_u, e):
         if F.ndim(e) == 1:
             e = F.unsqueeze(e, -1)
             expand_e = True
-
-    # ctx = F.context(u) if use_u else F.context(e)
-    # dtype = F.dtype(u) if use_u else F.dtype(e)
-    # u_shp = F.shape(u) if use_u else (0,)
-    # e_shp = F.shape(e) if use_e else (0,)
-    # _, dsttype = gidx.metagraph.find_edge(0)
-    # v_shp = (gidx.number_of_nodes(dsttype), ) +\
-    #     infer_broadcast_shape(op, u_shp[1:], e_shp[1:])
-    # v = F.zeros(v_shp, dtype, ctx)
-    # use_cmp = reduce_op in ['max', 'min']
-    # arg_u, arg_e = None, None
-    # idtype = getattr(F, gidx.dtype)
-    # if use_cmp:
-    #     if use_u:
-    #         arg_u = F.zeros(v_shp, idtype, ctx)
-    #     if use_e:
-    #         arg_e = F.zeros(v_shp, idtype, ctx)
-    # arg_u_nd = to_dgl_nd_for_write(arg_u)
-    # arg_e_nd = to_dgl_nd_for_write(arg_e)
+    
+    list_v = [] #5node type, #6 rel type
+    # cannot do this because of order
+    for key in dict_u.keys(): #double check all src_types
+        u = dict_u[key]
+        ctx = F.context(u) if use_u else F.context(e)
+        dtype = F.dtype(u) if use_u else F.dtype(e)
+        u_shp = F.shape(u) if use_u else (0,)
+        e_shp = F.shape(e) if use_e else (0,)
+        # pack node type id in param
+        _, dsttype = gidx.metagraph.find_edge(0) #node_typeid #TODO: what to do with this?
+        v_shp = (gidx.number_of_nodes(dsttype), ) +\
+            infer_broadcast_shape(op, u_shp[1:], e_shp[1:])
+        v = to_dgl_nd_for_write(F.zeros(v_shp, dtype, ctx))
+        list_v.append(v)
+    print("size of list_u", len(list_v), len(dict_u))
+    
+    use_cmp = reduce_op in ['max', 'min']
+    arg_u, arg_e = None, None
+    idtype = getattr(F, gidx.dtype)
+    if use_cmp:
+        if use_u:
+            arg_u = F.zeros(v_shp, idtype, ctx)
+        if use_e:
+            arg_e = F.zeros(v_shp, idtype, ctx)
+    arg_u_nd = to_dgl_nd_for_write(arg_u)
+    arg_e_nd = to_dgl_nd_for_write(arg_e)
 
     list_u = []
     if use_u:
@@ -164,9 +172,9 @@ def _gspmm(gidx, op, reduce_op, dict_u, e):
             
     if gidx.number_of_edges(0) > 0:
         _CAPI_DGLKernelSpMMHetero(gidx, op, reduce_op,
-                            list_u,
+                            list_u, #to_dgl_nd(u if use_u else None),
                             to_dgl_nd(e if use_e else None),
-                            to_dgl_nd_for_write(v),
+                            list_v,
                             arg_u_nd,
                             arg_e_nd)
     # NOTE(zihao): actually we can avoid the following step, because arg_*_nd
@@ -185,7 +193,9 @@ def _gspmm(gidx, op, reduce_op, dict_u, e):
         arg_u = F.squeeze(arg_u, -1)
     if expand_e and use_cmp:
         arg_e = F.squeeze(arg_e, -1)
-    return v, (arg_u, arg_e)
+    # tmp_v = F.zeros((3,), int, ctx)
+    return list_v[0], (arg_u, arg_e) # TODO
+    # return v, (arg_u, arg_e)
 
 
 def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):

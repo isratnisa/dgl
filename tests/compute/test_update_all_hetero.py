@@ -157,7 +157,10 @@ def test_level2(idtype):
     # ...      'attracts': (fn.copy_src('h', 'm'), fn.sum('m', 'h'))},
     # ... "sum")
     # 
-    g.update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'h'))
+    g['plays'].update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'h'))
+    # will require modifying invoke_sddmm
+    # g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'h')) 
+
 
     # g.multi_update_all(
     #     {'plays' : (mfunc, rfunc, afunc),
