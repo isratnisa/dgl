@@ -121,16 +121,20 @@ def test_level2(idtype):
     #############################################################
     #  update_all
     #############################################################
-    # g.nodes['user'].data['h'] = F.ones((3, 2))
+    g.nodes['user'].data['h'] = F.ones((3, 2))
+
+    # g['plays'].update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'h'))
+    g.update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'h'))
+    
     # g.update_all(mfunc, rfunc, etype='plays')
     # y = g.nodes['game'].data['y']
     # assert F.array_equal(y, F.tensor([[2., 2.], [2., 2.]]))
 
 
-# for (src_type, rel_type, dst_type) in g.canonical_etypes:
-#     g.nodes[src_type].data[‘h’] = F.ones((3, 2))
-#     g.update_all(mfunc, rfunc, etype=rel_type)
-#     y = g.nodes[dst_type].data[‘y’]
+    # for (src_type, rel_type, dst_type) in g.canonical_etypes:
+    #     g.nodes[src_type].data[‘h’] = F.ones((3, 2))
+    #     g.update_all(mfunc, rfunc, etype=rel_type)
+    #     y = g.nodes[dst_type].data[‘y’]
     
 
     # only one type
@@ -157,7 +161,7 @@ def test_level2(idtype):
     # ...      'attracts': (fn.copy_src('h', 'm'), fn.sum('m', 'h'))},
     # ... "sum")
     # 
-    g['plays'].update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'h'))
+
     # will require modifying invoke_sddmm
     # g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'h')) 
 
