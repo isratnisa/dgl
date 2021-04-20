@@ -81,17 +81,21 @@ def _expand(x, shape):
 
 
 class GSpMM(th.autograd.Function):
+
     @staticmethod
     @custom_fwd(cast_inputs=th.float16)
-    def forward(ctx, gidx, op, reduce_op, X, Y):
-        out, (argX, argY) = _gspmm(gidx, op, reduce_op, X, Y)
+    def forward(ctx, g, op, reduce_op, X, Y):
+        gidx=g._graph
+        out, (argX, argY) = _gspmm(g, op, reduce_op, X, Y)
         ctx.backward_cache = gidx, op, reduce_op
         ctx.save_for_backward(X, Y, argX, argY)
+        print("after forward")
         return out
 
     @staticmethod
     @custom_bwd
     def backward(ctx, dZ):
+        print("In backward")
         gidx, op, reduce_op = ctx.backward_cache
         X, Y, argX, argY = ctx.saved_tensors
         if op != 'copy_rhs' and ctx.needs_input_grad[3]:
@@ -303,8 +307,8 @@ class ScatterAdd(th.autograd.Function):
         return dy[idx], None, None
 
 
-def gspmm(gidx, op, reduce_op, lhs_data, rhs_data):
-    return GSpMM.apply(gidx, op, reduce_op, lhs_data, rhs_data)
+def gspmm(g, op, reduce_op, lhs_data, rhs_data):
+    return GSpMM.apply(g, op, reduce_op, lhs_data, rhs_data)
 
 
 def gsddmm(gidx, op, lhs_data, rhs_data, lhs_target='u', rhs_target='v'):

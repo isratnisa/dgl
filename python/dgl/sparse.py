@@ -74,7 +74,7 @@ target_mapping = {
 }
 
 
-def _gspmm(gidx, op, reduce_op, dict_u, e):
+def _gspmm(g, op, reduce_op, dict_u, e):
     r""" Generalized Sparse Matrix Multiplication interface. It takes the result of
     :attr:`op` on source node feature and edge feature, leads to a message on edge.
     Then aggregates the message by :attr:`reduce_op` on destination nodes.
@@ -117,6 +117,7 @@ def _gspmm(gidx, op, reduce_op, dict_u, e):
     """
     # if gidx.number_of_etypes() != 1:
     #     raise DGLError("We only support gspmm on graph with one edge type")
+    gidx = g._graph
     use_u = op != 'copy_rhs'
     use_e = op != 'copy_lhs'
     if use_u and use_e:
@@ -136,22 +137,26 @@ def _gspmm(gidx, op, reduce_op, dict_u, e):
         if F.ndim(e) == 1:
             e = F.unsqueeze(e, -1)
             expand_e = True
-    
-    list_v = [] #5node type, #6 rel type
-    # cannot do this because of order
-    for key in dict_u.keys(): #double check all src_types
-        u = dict_u[key]
+
+    list_u = [None] * gidx.number_of_ntypes()
+    list_v = [None] * gidx.number_of_ntypes()
+
+    for srctype, etype, dsttype in g.canonical_etypes:
+        etid = g.get_etype_id(etype)
+        u = dict_u[srctype]
+        
         ctx = F.context(u) if use_u else F.context(e)
         dtype = F.dtype(u) if use_u else F.dtype(e)
         u_shp = F.shape(u) if use_u else (0,)
         e_shp = F.shape(e) if use_e else (0,)
-        # pack node type id in param
-        _, dsttype = gidx.metagraph.find_edge(0) #node_typeid #TODO: what to do with this?
-        v_shp = (gidx.number_of_nodes(dsttype), ) +\
+        
+        src_id = g.get_ntype_id(srctype)
+        dst_id = g.get_ntype_id(dsttype)
+
+        list_u[src_id] = to_dgl_nd(u if use_u else None)
+        v_shp = (gidx.number_of_nodes(dst_id), ) +\
             infer_broadcast_shape(op, u_shp[1:], e_shp[1:])
-        v = to_dgl_nd_for_write(F.zeros(v_shp, dtype, ctx))
-        list_v.append(v)
-    print("size of list_u", len(list_v), len(dict_u))
+        list_v[dst_id] = to_dgl_nd_for_write(F.zeros(v_shp, dtype, ctx))
     
     use_cmp = reduce_op in ['max', 'min']
     arg_u, arg_e = None, None
@@ -164,12 +169,8 @@ def _gspmm(gidx, op, reduce_op, dict_u, e):
     arg_u_nd = to_dgl_nd_for_write(arg_u)
     arg_e_nd = to_dgl_nd_for_write(arg_e)
 
-    list_u = []
-    if use_u:
-        for key in dict_u.keys():
-            u = dict_u[key]
-            list_u.append(to_dgl_nd(u if use_u else None))
-            
+    print("list_u", list_u)
+    print("list_v", list_v)
     if gidx.number_of_edges(0) > 0:
         _CAPI_DGLKernelSpMMHetero(gidx, op, reduce_op,
                             list_u, #to_dgl_nd(u if use_u else None),

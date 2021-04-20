@@ -59,7 +59,7 @@ def gspmm(g, op, reduce_op, lhs_data, rhs_data):
             lhs_data = F.reshape(lhs_data, new_lhs_shape)
             rhs_data = F.reshape(rhs_data, new_rhs_shape)
     # With max and min reducers infinity will be returned for zero degree nodes
-    ret = gspmm_internal(g._graph, op,
+    ret = gspmm_internal(g, op,
                          'sum' if reduce_op == 'mean' else reduce_op,
                          lhs_data, rhs_data)
     # Replace infinity with zero for isolated nodes when reducer is min/max

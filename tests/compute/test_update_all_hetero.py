@@ -122,10 +122,12 @@ def test_level2(idtype):
     #  update_all
     #############################################################
     g.nodes['user'].data['h'] = F.ones((3, 2))
-
+    # g.nodes['game'].data['h'] = F.ones((3, 2))
+    g.nodes['developer'].data['h'] = F.ones((2, 1))
     # g['plays'].update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'h'))
+    print(g)
     g.update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'h'))
-    
+
     # g.update_all(mfunc, rfunc, etype='plays')
     # y = g.nodes['game'].data['y']
     # assert F.array_equal(y, F.tensor([[2., 2.], [2., 2.]]))
