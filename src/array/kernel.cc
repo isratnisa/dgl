@@ -63,14 +63,25 @@ void SpMMHetero(const std::string& op, const std::string& reduce,
   SparseFormat format = graph->SelectFormat(0, CSC_CODE);
   const auto& bcast = CalcBcastOff(op, ufeat[0], efeat); //TODO: might be none
 
-  ATEN_XPU_SWITCH_CUDA(graph->Context().device_type, XPU, "SpMM", {
+  std::vector<CSRMatrix> vec_graph;
+  std::vector<dgl_type_t> ufeat_eid;
+  std::vector<dgl_type_t> out_eid;
+  for (dgl_type_t etype = 0; etype < graph->NumEdgeTypes(); ++etype) {
+    vec_graph.push_back(graph->GetCSCMatrix(etype));
+    auto pair = graph->meta_graph()->FindEdge(etype); 
+    ufeat_eid.push_back(pair.first);
+    out_eid.push_back(pair.second);
+  }
+  //TODO:: change it to ATEN_XPU_SWITCH_CUDA when cuda codes are modified 
+  ATEN_XPU_SWITCH(graph->Context().device_type, XPU, "SpMM", {
     ATEN_ID_TYPE_SWITCH(graph->DataType(), IdType, {
-      ATEN_FLOAT_BITS_SWITCH(out[0]->dtype, bits, "Feature data", {
-        // if (format == SparseFormat::kCSC) {
-        //   SpMMCsr<XPU, IdType, bits>(
-        //       op, reduce, bcast, graph->GetCSCMatrix(0),
-        //       ufeat, efeat, out, out_aux);
-        // } else if (format == SparseFormat::kCOO) {
+      ATEN_FLOAT_BITS_SWITCH(out[out_eid[0]]->dtype, bits, "Feature data", {
+        if (format == SparseFormat::kCSC) {
+          SpMMCsrHetero<XPU, IdType, bits>(
+              op, reduce, bcast, vec_graph,
+              ufeat, efeat, out, out_aux,
+              ufeat_eid, out_eid);
+        } //else if (format == SparseFormat::kCOO) {
         //   SpMMCoo<XPU, IdType, bits>(
         //       op, reduce, bcast, graph->GetCOOMatrix(0),
         //       ufeat, efeat, out, out_aux);
@@ -284,13 +295,14 @@ DGL_REGISTER_GLOBAL("sparse._CAPI_DGLKernelSpMMHetero")
       U_vec.push_back(val->data);
     }
     for (Value val : list_V) {
-      U_vec.push_back(val->data);
+      V_vec.push_back(val->data);
     }
     for (dgl_type_t etype = 0; etype < graph->NumEdgeTypes(); ++etype) {
       // CHECK_EQ(graph->NumEdgeTypes(), 1);
       auto pair = graph->meta_graph()->FindEdge(etype); 
       const dgl_type_t src_id = pair.first;
       const dgl_type_t dst_id = pair.second;
+      std::cout << src_id << " " << dst_id << std::endl;
       CheckCtx(graph->Context(), {U_vec[src_id], E, V_vec[dst_id], ArgU, ArgE},
           {"U_data", "E_data", "out", "Arg_U", "Arg_E"});
       CheckContiguous({U_vec[src_id], E, V_vec[dst_id], ArgU, ArgE},

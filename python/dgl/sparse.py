@@ -188,15 +188,20 @@ def _gspmm(g, op, reduce_op, dict_u, e):
     arg_u = None if arg_u is None else F.zerocopy_from_dgl_ndarray(arg_u_nd)
     arg_e = None if arg_e is None else F.zerocopy_from_dgl_ndarray(arg_e_nd)
     # To deal with scalar node/edge features.
+    v = list_v[1]
     if (expand_u or not use_u) and (expand_e or not use_e):
         v = F.squeeze(v, -1)
+
+    # if (expand_u or not use_u) and (expand_e or not use_e):
+    #     for i in len(list_v):
+    #         list_v[i] = F.squeeze(list_v[i], -1)
     if expand_u and use_cmp:
         arg_u = F.squeeze(arg_u, -1)
     if expand_e and use_cmp:
         arg_e = F.squeeze(arg_e, -1)
     # tmp_v = F.zeros((3,), int, ctx)
-    return list_v[0], (arg_u, arg_e) # TODO
-    # return v, (arg_u, arg_e)
+    # return list_v[2], (arg_u, arg_e) # TODO
+    return list_v, (arg_u, arg_e)
 
 
 def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):

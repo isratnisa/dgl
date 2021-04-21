@@ -95,6 +95,90 @@ void SpMMSumCsr(const BcastOff& bcast, const CSRMatrix& csr, NDArray ufeat,
 }
 
 /*!
+ * \brief CPU kernel of SpMM on Csr format.
+ * \param bcast Broadcast information.
+ * \param csr The Csr matrix.
+ * \param ufeat The feature on source nodes.
+ * \param efeat The feature on edges.
+ * \param out The result feature on destination nodes.
+ * \note it uses node parallel strategy, different threads are responsible
+ *       for the computation of different nodes.
+ */
+template <typename IdType, typename DType, typename Op>
+void SpMMSumCsrHetero(const BcastOff& bcast, const std::vector<CSRMatrix>& vec_csr, 
+                std::vector<NDArray>& ufeat, NDArray efeat, 
+                std::vector<NDArray>& out, const std::vector<dgl_type_t>& ufeat_eid,
+                const std::vector<dgl_type_t>& out_eid) {
+  printf("SpMM Sum hetero called\n");
+  dgl_type_t etype = 0; //make it a for loop
+  CSRMatrix csr = vec_csr[etype];
+  const dgl_type_t src_id = ufeat_eid[etype];
+  const dgl_type_t dst_id = out_eid[etype];
+
+
+  const bool has_idx = !IsNullArray(csr.data);
+  const IdType* indptr = csr.indptr.Ptr<IdType>();
+  const IdType* indices = csr.indices.Ptr<IdType>();
+  const IdType* edges = csr.data.Ptr<IdType>();
+  const DType* X = ufeat[src_id].Ptr<DType>();
+  const DType* W = efeat.Ptr<DType>();
+  int64_t dim = bcast.out_len, lhs_dim = bcast.lhs_len, rhs_dim = bcast.rhs_len;
+  DType* O = out[dst_id].Ptr<DType>();
+#if !defined(_WIN32)
+#ifdef USE_AVX
+  typedef dgl::ElemWiseAddUpdate<Op> ElemWiseUpd;
+  /* Prepare an assembler kernel */
+  static std::unique_ptr<ElemWiseUpd> asm_kernel_ptr(
+    (dgl::IntelKernel<>::IsEnabled()) ? new ElemWiseUpd() : nullptr);
+  /* Distribute the kernel among OMP threads */
+  ElemWiseUpd* cpu_spec = (asm_kernel_ptr && asm_kernel_ptr->applicable())
+                            ? asm_kernel_ptr.get()
+                            : nullptr;
+  if (cpu_spec && dim > 16 && !bcast.use_bcast) {
+#pragma omp parallel for
+    for (IdType rid = 0; rid < csr.num_rows; ++rid) {
+      const IdType row_start = indptr[rid], row_end = indptr[rid + 1];
+      DType* out_off = O + rid * dim;
+      std::fill(out_off, out_off + dim, 0);
+      for (IdType j = row_start; j < row_end; ++j) {
+        const IdType cid = indices[j];
+        const IdType eid = has_idx ? edges[j] : j;
+        cpu_spec->run(out_off, X + cid * lhs_dim, W + eid * rhs_dim, dim);
+      }
+    }
+  } else {
+#endif  // USE_AVX
+#endif  // _WIN32
+
+#pragma omp parallel for
+    for (IdType rid = 0; rid < csr.num_rows; ++rid) {
+      const IdType row_start = indptr[rid], row_end = indptr[rid + 1];
+      DType* out_off = O + rid * dim;
+      std::fill(out_off, out_off + dim, 0);
+      for (IdType j = row_start; j < row_end; ++j) {
+        const IdType cid = indices[j];
+        const IdType eid = has_idx ? edges[j] : j;
+        for (int64_t k = 0; k < dim; ++k) {
+          const int64_t lhs_add = bcast.use_bcast ? bcast.lhs_offset[k] : k;
+          const int64_t rhs_add = bcast.use_bcast ? bcast.rhs_offset[k] : k;
+          const DType* lhs_off =
+            Op::use_lhs ? X + cid * lhs_dim + lhs_add : nullptr;
+          const DType* rhs_off =
+            Op::use_rhs ? W + eid * rhs_dim + rhs_add : nullptr;
+          out_off[k] += Op::Call(lhs_off, rhs_off);
+        }
+      }
+    }
+#if !defined(_WIN32)
+#ifdef USE_AVX
+  }
+#endif  // USE_AVX
+#endif  // _WIN32
+}
+
+
+
+/*!
  * \brief CPU kernel of SpMM on Coo format.
  * \param bcast Broadcast information.
  * \param coo The Coo matrix.

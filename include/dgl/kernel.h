@@ -38,6 +38,27 @@ void SpMM(const std::string& op, const std::string& reduce,
           std::vector<NDArray> out_aux);
 
 /*!
+ * \brief Generalized Sparse Matrix-Matrix Multiplication.
+ * \param op The binary operator, could be `add`, `sub', `mul`, 'div',
+ *        `copy_u`, `copy_e'.
+ * \param op The reduce operator, could be `sum`, `min`, `max'.
+ * \param graph The vector of graphs we apply SpMM on.
+ * \param ufeat The source node feature for different etype
+ * \param efeat The edge feature for different etype
+ * \param out The output feature on destination nodes for different etype
+ * \param out_aux A list of NDArray's that contains auxiliary information such
+ *        as the argmax on source nodes and edges for reduce operators such as
+ *        `min` and `max`.
+ */
+void SpMMHetero(const std::string& op, const std::string& reduce,
+           const BcastOff& bcast,
+           const std::vector<CSRMatrix>& csr,
+           std::vector<NDArray> ufeat,
+           NDArray efeat,
+           std::vector<NDArray> out,
+           std::vector<NDArray> out_aux);
+
+/*!
  * \brief Generalized Sampled Dense-Dense Matrix Multiplication.
  * \param op The binary operator, could be `add`, `sub', `mul`, 'div',
  *        `dot`, `copy_u`, `copy_e'.

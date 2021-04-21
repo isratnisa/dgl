@@ -81,7 +81,6 @@ def _expand(x, shape):
 
 
 class GSpMM(th.autograd.Function):
-
     @staticmethod
     @custom_fwd(cast_inputs=th.float16)
     def forward(ctx, g, op, reduce_op, X, Y):
@@ -89,7 +88,7 @@ class GSpMM(th.autograd.Function):
         out, (argX, argY) = _gspmm(g, op, reduce_op, X, Y)
         ctx.backward_cache = gidx, op, reduce_op
         ctx.save_for_backward(X, Y, argX, argY)
-        print("after forward")
+        print("GSpMM.forward finished")
         return out
 
     @staticmethod

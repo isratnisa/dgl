@@ -40,6 +40,43 @@ void SpMMCsr(const std::string& op, const std::string& reduce,
   }
 }
 
+/*! \brief Generalized SpMM on Csr format. */
+template <int XPU, typename IdType, int bits>
+void SpMMCsrHetero(const std::string& op, const std::string& reduce,
+             const BcastOff& bcast,
+             const std::vector<CSRMatrix>& csr,
+             std::vector<NDArray> ufeat,
+             NDArray efeat,
+             std::vector<NDArray> out,
+             std::vector<NDArray> out_aux,
+             const std::vector<dgl_type_t> ufeat_eid,
+             const std::vector<dgl_type_t> out_eid) {
+  if (reduce == "sum") {
+    SWITCH_BITS(bits, DType, {
+      SWITCH_OP(op, Op, {
+        cpu::SpMMSumCsrHetero<IdType, DType, Op>(bcast, csr, ufeat, efeat,
+        out, ufeat_eid, out_eid);
+      });
+    });
+  } 
+  else if (reduce == "max" || reduce == "min") {
+  //   SWITCH_BITS(bits, DType, {
+  //     SWITCH_OP(op, Op, {
+  //       if (reduce == "max")
+  //         cpu::SpMMCmpCsr<IdType, DType, Op, cpu::op::Max<DType>>(
+  //             bcast, csr, ufeat, efeat, out, out_aux[0], out_aux[1]);
+  //       else
+  //         cpu::SpMMCmpCsr<IdType, DType, Op, cpu::op::Min<DType>>(
+  //             bcast, csr, ufeat, efeat, out, out_aux[0], out_aux[1]);
+  //     });
+  //   });
+  } 
+  else {
+    LOG(FATAL) << "Unsupported SpMM reducer: " << reduce;
+  }
+}
+
+
 template void SpMMCsr<kDLCPU, int32_t, 16>(
     const std::string& op, const std::string& reduce,
     const BcastOff& bcast, const CSRMatrix& csr,
@@ -64,6 +101,43 @@ template void SpMMCsr<kDLCPU, int64_t, 64>(
     const std::string& op, const std::string& reduce,
     const BcastOff& bcast, const CSRMatrix& csr,
     NDArray ufeat, NDArray efeat, NDArray out, std::vector<NDArray> out_aux);
+
+template void SpMMCsrHetero<kDLCPU, int32_t, 16>(
+    const std::string& op, const std::string& reduce,
+    const BcastOff& bcast, const std::vector<CSRMatrix>& csr,
+    std::vector<NDArray> ufeat, NDArray efeat, std::vector<NDArray> out, 
+    std::vector<NDArray> out_aux, std::vector<dgl_type_t> ufeat_eid,
+    std::vector<dgl_type_t> out_eid);
+template void SpMMCsrHetero<kDLCPU, int64_t, 16>(
+    const std::string& op, const std::string& reduce,
+    const BcastOff& bcast, const std::vector<CSRMatrix>& csr,
+    std::vector<NDArray> ufeat, NDArray efeat, std::vector<NDArray> out, 
+    std::vector<NDArray> out_aux, std::vector<dgl_type_t> ufeat_eid,
+    std::vector<dgl_type_t> out_eid);
+template void SpMMCsrHetero<kDLCPU, int32_t, 32>(
+    const std::string& op, const std::string& reduce,
+    const BcastOff& bcast, const std::vector<CSRMatrix>& csr,
+    std::vector<NDArray> ufeat, NDArray efeat, std::vector<NDArray> out, 
+    std::vector<NDArray> out_aux, std::vector<dgl_type_t> ufeat_eid,
+    std::vector<dgl_type_t> out_eid);
+template void SpMMCsrHetero<kDLCPU, int64_t, 32>(
+    const std::string& op, const std::string& reduce,
+    const BcastOff& bcast, const std::vector<CSRMatrix>& csr,
+    std::vector<NDArray> ufeat, NDArray efeat, std::vector<NDArray> out, 
+    std::vector<NDArray> out_aux, std::vector<dgl_type_t> ufeat_eid,
+    std::vector<dgl_type_t> out_eid);
+template void SpMMCsrHetero<kDLCPU, int32_t, 64>(
+    const std::string& op, const std::string& reduce,
+    const BcastOff& bcast, const std::vector<CSRMatrix>& csr,
+    std::vector<NDArray> ufeat, NDArray efeat, std::vector<NDArray> out, 
+    std::vector<NDArray> out_aux, std::vector<dgl_type_t> ufeat_eid,
+    std::vector<dgl_type_t> out_eid);
+template void SpMMCsrHetero<kDLCPU, int64_t, 64>(
+    const std::string& op, const std::string& reduce,
+    const BcastOff& bcast, const std::vector<CSRMatrix>& csr,
+    std::vector<NDArray> ufeat, NDArray efeat, std::vector<NDArray> out, 
+    std::vector<NDArray> out_aux, std::vector<dgl_type_t> ufeat_eid,
+    std::vector<dgl_type_t> out_eid);
 
 
 /*! \brief Generalized SpMM on Coo format. */
