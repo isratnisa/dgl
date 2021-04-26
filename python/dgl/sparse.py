@@ -140,11 +140,13 @@ def _gspmm(g, op, reduce_op, dict_u, e):
 
     list_u = [None] * gidx.number_of_ntypes()
     list_v = [None] * gidx.number_of_ntypes()
+    list_dsttype = [None] * gidx.number_of_ntypes()
+    dict_v = {}
 
     for srctype, etype, dsttype in g.canonical_etypes:
         etid = g.get_etype_id(etype)
         u = dict_u[srctype]
-        
+
         ctx = F.context(u) if use_u else F.context(e)
         dtype = F.dtype(u) if use_u else F.dtype(e)
         u_shp = F.shape(u) if use_u else (0,)
@@ -157,7 +159,7 @@ def _gspmm(g, op, reduce_op, dict_u, e):
         v_shp = (gidx.number_of_nodes(dst_id), ) +\
             infer_broadcast_shape(op, u_shp[1:], e_shp[1:])
         list_v[dst_id] = to_dgl_nd_for_write(F.zeros(v_shp, dtype, ctx))
-    
+        list_dsttype[dst_id] = dsttype # tmporary store dst_id to track the dsttype
     use_cmp = reduce_op in ['max', 'min']
     arg_u, arg_e = None, None
     idtype = getattr(F, gidx.dtype)
@@ -188,20 +190,21 @@ def _gspmm(g, op, reduce_op, dict_u, e):
     arg_u = None if arg_u is None else F.zerocopy_from_dgl_ndarray(arg_u_nd)
     arg_e = None if arg_e is None else F.zerocopy_from_dgl_ndarray(arg_e_nd)
     # To deal with scalar node/edge features.
-    v = list_v[1]
-    if (expand_u or not use_u) and (expand_e or not use_e):
-        v = F.squeeze(v, -1)
+    for l in range(len(list_v)):
+        key = None if list_dsttype[l] is None else list_dsttype[l]
+        dict_v[key] = None if list_v[l] is None else F.zerocopy_from_dgl_ndarray(list_v[l])
+        if (expand_u or not use_u) and (expand_e or not use_e):
+            dict_v[key] = F.squeeze(dict_v[key], -1)
+
+    v = F.zerocopy_from_dgl_ndarray(list_v[1]) #returning this works
+    v = F.squeeze(v, -1)
 
     # if (expand_u or not use_u) and (expand_e or not use_e):
-    #     for i in len(list_v):
-    #         list_v[i] = F.squeeze(list_v[i], -1)
     if expand_u and use_cmp:
         arg_u = F.squeeze(arg_u, -1)
     if expand_e and use_cmp:
         arg_e = F.squeeze(arg_e, -1)
-    # tmp_v = F.zeros((3,), int, ctx)
-    # return list_v[2], (arg_u, arg_e) # TODO
-    return list_v, (arg_u, arg_e)
+    return dict_v, (arg_u, arg_e)
 
 
 def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):
