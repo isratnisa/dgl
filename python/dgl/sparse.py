@@ -5,6 +5,7 @@ from . import ndarray as nd
 from ._ffi.function import _init_api
 from .base import DGLError
 from . import backend as F
+import torch
 
 
 def infer_broadcast_shape(op, shp1, shp2):
@@ -190,21 +191,22 @@ def _gspmm(g, op, reduce_op, dict_u, e):
     arg_u = None if arg_u is None else F.zerocopy_from_dgl_ndarray(arg_u_nd)
     arg_e = None if arg_e is None else F.zerocopy_from_dgl_ndarray(arg_e_nd)
     # To deal with scalar node/edge features.
-    for l in range(len(list_v)):
-        key = None if list_dsttype[l] is None else list_dsttype[l]
-        dict_v[key] = None if list_v[l] is None else F.zerocopy_from_dgl_ndarray(list_v[l])
-        if (expand_u or not use_u) and (expand_e or not use_e):
-            dict_v[key] = F.squeeze(dict_v[key], -1)
+    # for l in range(len(list_v)):
+    #     list_v[l] = None if list_v[l] is None else F.zerocopy_from_dgl_ndarray(list_v[l])
 
+    out = (F.zerocopy_from_dgl_ndarray(list_v[1]), F.zerocopy_from_dgl_ndarray(list_v[2]))
+    # all(ele is None for ele in test_tup)
+    # out = all(v1 is None for v1 in list_v)
     v = F.zerocopy_from_dgl_ndarray(list_v[1]) #returning this works
     v = F.squeeze(v, -1)
+    print(out)
 
     # if (expand_u or not use_u) and (expand_e or not use_e):
     if expand_u and use_cmp:
         arg_u = F.squeeze(arg_u, -1)
     if expand_e and use_cmp:
         arg_e = F.squeeze(arg_e, -1)
-    return dict_v, (arg_u, arg_e)
+    return out, (arg_u, arg_e)
 
 
 def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):
