@@ -4793,7 +4793,7 @@ class DGLHeteroGraph(object):
         """Send messages along all the edges, reduce them by first type-wisely
         """
         print("mfunc: ", mfunc, "rfunc: ", rfunc, "afunc: ", afunc)
-        all_out = [] #= defaultdict(list)
+        # all_out = [] #= defaultdict(list)
         # merge_order = defaultdict(list)
         # for etype, args in etype_dict.items():
         #     etid = self.get_etype_id(etype)
@@ -4806,8 +4806,8 @@ class DGLHeteroGraph(object):
         g = self #if etype is None else self[etype]
 
             # all_out[dtid].append(core.message_passing(g, mfunc, rfunc, afunc))
-        all_out.append(core.message_passing(g, mfunc, rfunc, afunc))
-            
+        all_out = core.message_passing(g, mfunc, rfunc, afunc)
+        print("all_out", all_out)
             # merge_order[dtid].append(etid)  # use edge type id as merge order hint
         # for dtid, frames in all_out.items():
         #     # merge by cross_reducer

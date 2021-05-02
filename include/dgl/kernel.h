@@ -38,7 +38,7 @@ void SpMM(const std::string& op, const std::string& reduce,
           std::vector<NDArray> out_aux);
 
 /*!
- * \brief Generalized Sparse Matrix-Matrix Multiplication.
+ * \brief Generalized Sparse Matrix-Matrix Multiplication on Heterograph.
  * \param op The binary operator, could be `add`, `sub', `mul`, 'div',
  *        `copy_u`, `copy_e'.
  * \param op The reduce operator, could be `sum`, `min`, `max'.
@@ -72,6 +72,22 @@ void SDDMM(const std::string& op,
            NDArray ufeat,
            NDArray efeat,
            NDArray out);
+/*!
+ * \brief Generalized Sampled Dense-Dense Matrix Multiplication on Heterograph.
+ * \param op The binary operator, could be `add`, `sub', `mul`, 'div',
+ *        `dot`, `copy_u`, `copy_e'.
+ * \param graph The graph we apply SpMM on.
+ * \param ufeat The source node feature.
+ * \param vfeat The destination node feature.
+ * \param out The output feature on edge.
+ */
+void SDDMMHetero(const std::string& op,
+           HeteroGraphPtr graph,
+           std::vector<NDArray> lhs,
+           std::vector<NDArray> rhs,
+           std::vector<NDArray> out,
+           int lhs_target,
+           int rhs_target);
 
 /*!
  * \brief Sparse-sparse matrix multiplication.

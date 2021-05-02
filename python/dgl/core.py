@@ -258,7 +258,7 @@ def invoke_gspmm(graph, mfunc, rfunc, *, srcdata=None, dstdata=None, edata=None)
     else:
         x = alldata[mfunc.target][mfunc.in_field]
         op = getattr(ops, '{}_{}'.format(mfunc.name, rfunc.name))
-        print("outside binary else : ", x)
+        print("outside binary else : ", x, mfunc.target, mfunc.in_field)
         z = op(graph, x)
     return {rfunc.out_field : z}
 
@@ -290,12 +290,14 @@ def message_passing(g, mfunc, rfunc, afunc):
         # message phase
 
         if is_builtin(mfunc):
+            print("msg_passing: mfunc else")
             msgdata = invoke_gsddmm(g, mfunc)
         else:
             orig_eid = g.edata.get(EID, None)
             msgdata = invoke_edge_udf(g, ALL, g.canonical_etypes[0], mfunc, orig_eid=orig_eid)
         # reduce phase
         if is_builtin(rfunc):
+            print("msg_passing: rfunc else")
             msg = rfunc.msg_field
             ndata = invoke_gspmm(g, fn.copy_e(msg, msg), rfunc, edata=msgdata)
         else:

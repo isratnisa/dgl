@@ -122,11 +122,37 @@ def test_level2(idtype):
     #  update_all
     #############################################################
     g.nodes['user'].data['h'] = F.ones((3, 2))
-    # g.nodes['game'].data['h'] = F.ones((3, 2))
+    g.nodes['game'].data['w'] = F.ones((2, 2))
     g.nodes['developer'].data['h'] = F.ones((2, 1))
     # g['plays'].update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'h'))
     print(g)
-    g.update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'h'))
+    g.update_all_new(fn.copy_e('h', 'm'), fn.sum('m', 'h'))
+    # will require modifying invoke_sddmm
+    # g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'h')) 
+    # g.update_all(mfunc, rfunc, etype='plays')
+    # g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'h')) 
+
+
+    # g.nodes['user'].data['h'] = F.ones((3, 2))
+    # g.update_all(mfunc, rfunc, etype='plays')
+    # y = g.nodes['game'].data['y']
+    # assert F.array_equal(y, F.tensor([[2., 2.], [2., 2.]]))
+
+    # # only one type
+    # g['plays'].update_all(mfunc, rfunc)
+    # y = g.nodes['game'].data['y']
+    # assert F.array_equal(y, F.tensor([[2., 2.], [2., 2.]]))
+
+    # # test fail case
+    # # fail due to multiple types
+    # with pytest.raises(DGLError):
+    #     g.update_all(mfunc, rfunc)
+
+    # # test multi
+    # g.multi_update_all(
+    #     {'plays' : (mfunc, rfunc),
+    #      ('user', 'wishes', 'game'): (mfunc, rfunc2)},
+    #     'sum')
 
     # g.update_all(mfunc, rfunc, etype='plays')
     # y = g.nodes['game'].data['y']

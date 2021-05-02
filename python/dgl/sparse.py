@@ -74,22 +74,17 @@ target_mapping = {
     'dst': 2
 }
 
-
-def _gspmm(g, op, reduce_op, dict_u, e):
+def _gspmm(gidx, op, reduce_op, u, e):
     r""" Generalized Sparse Matrix Multiplication interface. It takes the result of
     :attr:`op` on source node feature and edge feature, leads to a message on edge.
     Then aggregates the message by :attr:`reduce_op` on destination nodes.
-
     .. math::
         x_v = \psi_{(u, v, e)\in \mathcal{G}}(\rho(x_u, x_e))
-
     where :math:`x_v` is the returned feature on destination nodes, and :math`x_u`,
     :math:`x_e` refers to :attr:`u`, :attr:`e` respectively. :math:`\rho` means binary
     operator :attr:`op` and :math:`\psi` means reduce operator :attr:`reduce_op`,
     :math:`\mathcal{G}` is the graph we apply gspmm on: :attr:`g`.
-
     Note that this function does not handle gradients.
-
     Parameters
     ----------
     gidx : HeteroGraphIndex
@@ -103,7 +98,6 @@ def _gspmm(g, op, reduce_op, dict_u, e):
         The feature on source nodes, could be None if op is ``copy_rhs``.
     e : tensor or None
         The feature on edges, could be None if op is ``copy_lhs``.
-
     Returns
     -------
     tuple
@@ -111,13 +105,78 @@ def _gspmm(g, op, reduce_op, dict_u, e):
         - The first element refers to the result tensor.
         - The second element refers to a tuple composed of arg_u and arg_e
           (which is useful when reducer is `min`/`max`).
-
     Notes
     -----
     This function does not handle gradients.
     """
-    # if gidx.number_of_etypes() != 1:
-    #     raise DGLError("We only support gspmm on graph with one edge type")
+    print("SPMM for homogeneous:")
+    if gidx.number_of_etypes() != 1:
+        raise DGLError("We only support gspmm on graph with one edge type")
+    use_u = op != 'copy_rhs'
+    use_e = op != 'copy_lhs'
+    if use_u and use_e:
+        if F.dtype(u) != F.dtype(e):
+            raise DGLError("The node features' data type {} doesn't match edge"
+                           " features' data type {}, please convert them to the"
+                           " same type.".format(F.dtype(u), F.dtype(e)))
+    # deal with scalar features.
+    expand_u, expand_e = False, False
+    if use_u:
+        if F.ndim(u) == 1:
+            u = F.unsqueeze(u, -1)
+            expand_u = True
+    if use_e:
+        if F.ndim(e) == 1:
+            e = F.unsqueeze(e, -1)
+            expand_e = True
+
+    ctx = F.context(u) if use_u else F.context(e)
+    dtype = F.dtype(u) if use_u else F.dtype(e)
+    u_shp = F.shape(u) if use_u else (0,)
+    e_shp = F.shape(e) if use_e else (0,)
+    _, dsttype = gidx.metagraph.find_edge(0)
+    v_shp = (gidx.number_of_nodes(dsttype), ) +\
+        infer_broadcast_shape(op, u_shp[1:], e_shp[1:])
+    v = F.zeros(v_shp, dtype, ctx)
+    use_cmp = reduce_op in ['max', 'min']
+    arg_u, arg_e = None, None
+    idtype = getattr(F, gidx.dtype)
+    if use_cmp:
+        if use_u:
+            arg_u = F.zeros(v_shp, idtype, ctx)
+        if use_e:
+            arg_e = F.zeros(v_shp, idtype, ctx)
+    arg_u_nd = to_dgl_nd_for_write(arg_u)
+    arg_e_nd = to_dgl_nd_for_write(arg_e)
+    if gidx.number_of_edges(0) > 0:
+        _CAPI_DGLKernelSpMM(gidx, op, reduce_op,
+                            to_dgl_nd(u if use_u else None),
+                            to_dgl_nd(e if use_e else None),
+                            to_dgl_nd_for_write(v),
+                            arg_u_nd,
+                            arg_e_nd)
+    # NOTE(zihao): actually we can avoid the following step, because arg_*_nd
+    # refers to the data that stores arg_*. After we call _CAPI_DGLKernelSpMM,
+    # arg_* should have already been changed. But we found this doesn't work
+    # under Tensorflow when index type is int32. (arg_u and arg_e would be
+    # all zero).
+    # The workaround is proposed by Jinjing, and we still need to investigate
+    # where the problem is.
+    arg_u = None if arg_u is None else F.zerocopy_from_dgl_ndarray(arg_u_nd)
+    arg_e = None if arg_e is None else F.zerocopy_from_dgl_ndarray(arg_e_nd)
+    # To deal with scalar node/edge features.
+    if (expand_u or not use_u) and (expand_e or not use_e):
+        v = F.squeeze(v, -1)
+    if expand_u and use_cmp:
+        arg_u = F.squeeze(arg_u, -1)
+    if expand_e and use_cmp:
+        arg_e = F.squeeze(arg_e, -1)
+    return v, (arg_u, arg_e)
+
+def _gspmm_hetero(g, op, reduce_op, dict_u, e):
+    r""" Generalized Sparse Matrix Multiplication interface. 
+    """
+    print("SPMM for heterogeneous:")
     gidx = g._graph
     use_u = op != 'copy_rhs'
     use_e = op != 'copy_lhs'
@@ -144,9 +203,11 @@ def _gspmm(g, op, reduce_op, dict_u, e):
     list_dsttype = [None] * gidx.number_of_ntypes()
     dict_v = {}
 
+    print("use_u dict u", use_u, e)
+
     for srctype, etype, dsttype in g.canonical_etypes:
         etid = g.get_etype_id(etype)
-        u = dict_u[srctype]
+        u = None if use_u is False else dict_u[srctype]
 
         ctx = F.context(u) if use_u else F.context(e)
         dtype = F.dtype(u) if use_u else F.dtype(e)
@@ -208,20 +269,16 @@ def _gspmm(g, op, reduce_op, dict_u, e):
         arg_e = F.squeeze(arg_e, -1)
     return out, (arg_u, arg_e)
 
-
 def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):
     r""" Generalized Sampled-Dense-Dense Matrix Multiplication interface. It
     takes the result of :attr:`op` on source node feature and destination node
     feature, leads to a feature on edge.
-
     .. math::
         x_{e} = \phi(x_u, x_e, x_v), \forall (u,e,v)\in \mathcal{G}
-
     where :math:`x_{e}` is the returned feature on edges and :math:`x_u`,
     :math:`x_v` refers to :attr:`u`, :attr:`v` respectively. :math:`\phi`
     is the binary operator :attr:`op`, and :math:`\mathcal{G}` is the graph
     we apply gsddmm on: :attr:`g`.
-
     Parameters
     ----------
     gidx : HeteroGraphIndex
@@ -239,16 +296,15 @@ def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):
     rhs_target : str
         The target of right hand operand, could be ``src``, ``edge``, ``dst``
         or their alias ``u``, ``e``, ``v``.
-
     Returns
     -------
     tensor
         The result tensor.
-
     Notes
     -----
     This function does not handle gradients.
     """
+    print("SDDMM for homogeneous:")
     if gidx.number_of_etypes() != 1:
         raise DGLError("We only support gsddmm on graph with one edge type")
     use_lhs = op != 'copy_rhs'
@@ -284,6 +340,74 @@ def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):
                              lhs_target, rhs_target)
     if (expand_lhs or not use_lhs) and (expand_rhs or not use_rhs):
         out = F.squeeze(out, -1)
+    return out
+
+def _gsddmm_hetero(g, op, lhs_dict, rhs_dict, lhs_target='u', rhs_target='v'):
+    r""" Generalized Sampled-Dense-Dense Matrix Multiplication interface. 
+    """
+    print("SDDMM for heterogeneous:")
+    gidx = g._graph
+    # if gidx.number_of_etypes() != 1:
+    #     raise DGLError("We only support gsddmm on graph with one edge type")
+    use_lhs = op != 'copy_rhs'
+    use_rhs = op != 'copy_lhs'
+    if use_lhs and use_rhs:
+        for srctype, etype, dsttype in g.canonical_etypes:
+            if F.dtype(lhs_dict[srctype]) != F.dtype(rhs_dict[srctype]):
+                raise DGLError("The operands data type don't match: {} and {}, please convert them"
+                               " to the same type.".format(F.dtype(lhs_dict[srctype]), F.dtype(rhs_dict[srctype])))
+    # deal with scalar features.
+    expand_lhs, expand_rhs = False, False
+    if use_lhs:
+        for key in lhs_dict.keys():
+            lhs = lhs_dict[key]
+            if F.ndim(lhs) == 1:
+                lhs = F.unsqueeze(lhs, -1)
+                expand_lhs = True
+    if use_rhs:
+        for key in rhs_dict.keys():
+            rhs = rhs_dict[key]
+            if F.ndim(rhs) == 1:
+                rhs = F.unsqueeze(rhs, -1)
+                expand_rhs = True
+    lhs_target = target_mapping[lhs_target]
+    rhs_target = target_mapping[rhs_target]
+    print('rhs target', rhs_target)
+
+    lhs_list = [None] * gidx.number_of_ntypes()
+    rhs_list = [None] * gidx.number_of_ntypes()
+    out_list = [None] * gidx.number_of_ntypes()
+    list_dsttype = [None] * gidx.number_of_ntypes()
+    dict_v = {}
+    print("calling gsddmm??!!")
+    for srctype, etype, dsttype in g.canonical_etypes:
+        etid = g.get_etype_id(etype)
+        src_id = g.get_ntype_id(srctype)
+        dst_id = g.get_ntype_id(dsttype)
+        lhs = lhs_dict[srctype]
+        rhs = rhs_dict[srctype]
+        
+        ctx = F.context(lhs) if use_lhs else F.context(rhs)
+        dtype = F.dtype(lhs) if use_lhs else F.dtype(rhs)
+        lhs_shp = F.shape(lhs) if use_lhs else (0,)
+        rhs_shp = F.shape(rhs) if use_rhs else (0,)
+        lhs_list[src_id] = to_dgl_nd(lhs if use_lhs else None)
+        rhs_list[src_id] = to_dgl_nd(rhs if use_rhs else None)
+        out_shp = (gidx.number_of_edges(dst_id), ) +\
+            infer_broadcast_shape(op, lhs_shp[1:], rhs_shp[1:])
+        out_list[dst_id] = to_dgl_nd_for_write(F.zeros(out_shp, dtype, ctx))
+
+    if gidx.number_of_edges(0) > 0:
+        _CAPI_DGLKernelSDDMMHetero(gidx, op,
+                             lhs_list,
+                             rhs_list,
+                             out_list,
+                             lhs_target, rhs_target)
+    
+    out = (F.zerocopy_from_dgl_ndarray(out_list[1]))
+   
+    if (expand_lhs or not use_lhs) and (expand_rhs or not use_rhs):
+        out_list[1] = F.squeeze(out_list[1], -1)
     return out
 
 

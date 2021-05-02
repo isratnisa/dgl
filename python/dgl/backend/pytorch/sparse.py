@@ -1,7 +1,7 @@
 import torch as th
 from distutils.version import LooseVersion
 from ...base import is_all, ALL
-from ...sparse import _gspmm, _gsddmm, _segment_reduce, _bwd_segment_cmp, _scatter_add
+from ...sparse import _gspmm, _gspmm_hetero, _gsddmm, _gsddmm_hetero, _segment_reduce, _bwd_segment_cmp, _scatter_add
 
 if LooseVersion(th.__version__) >= LooseVersion("1.6.0"):
     from torch.cuda.amp import custom_fwd, custom_bwd
@@ -84,11 +84,14 @@ class GSpMM(th.autograd.Function):
     @staticmethod
     @custom_fwd(cast_inputs=th.float16)
     def forward(ctx, g, op, reduce_op, X, Y):
-        gidx=g._graph
-        out, (argX, argY) = _gspmm(g, op, reduce_op, X, Y)
-        ctx.backward_cache = gidx, op, reduce_op
+        if g._graph.number_of_etypes() > 1:
+            print("X not a dict. Calling hetero SpMM")
+            out, (argX, argY) = _gspmm_hetero(g, op, reduce_op, X, Y)
+        else:
+            print("X not a dict. Calling homo SpMM")
+            out, (argX, argY) = _gspmm(g._graph, op, reduce_op, X, Y)
+        ctx.backward_cache = g._graph, op, reduce_op
         ctx.save_for_backward(X, Y, argX, argY)
-        print("GSpMM.forward finished")
         return out
 
     @staticmethod
@@ -148,9 +151,12 @@ class GSpMM(th.autograd.Function):
 class GSDDMM(th.autograd.Function):
     @staticmethod
     @custom_fwd(cast_inputs=th.float16)
-    def forward(ctx, gidx, op, X, Y, lhs_target, rhs_target):
-        out = _gsddmm(gidx, op, X, Y, lhs_target, rhs_target)
-        ctx.backward_cache = gidx, op, lhs_target, rhs_target
+    def forward(ctx, g, op, X, Y, lhs_target, rhs_target):
+        if g._graph.number_of_etypes() > 1:
+            out = _gsddmm_hetero(g, op, X, Y, lhs_target, rhs_target)
+        else:
+            out = _gsddmm(g._graph, op, X, Y, lhs_target, rhs_target)
+        ctx.backward_cache = g._graph, op, lhs_target, rhs_target
         ctx.save_for_backward(X, Y)
         return out
 
@@ -309,10 +315,8 @@ class ScatterAdd(th.autograd.Function):
 def gspmm(g, op, reduce_op, lhs_data, rhs_data):
     return GSpMM.apply(g, op, reduce_op, lhs_data, rhs_data)
 
-
 def gsddmm(gidx, op, lhs_data, rhs_data, lhs_target='u', rhs_target='v'):
     return GSDDMM.apply(gidx, op, lhs_data, rhs_data, lhs_target, rhs_target)
-
 
 def edge_softmax(gidx, logits, eids=ALL, norm_by='dst'):
     return EdgeSoftmax.apply(gidx, logits, eids, norm_by)
