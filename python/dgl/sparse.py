@@ -129,7 +129,8 @@ def _gspmm(gidx, op, reduce_op, u, e):
         if F.ndim(e) == 1:
             e = F.unsqueeze(e, -1)
             expand_e = True
-
+    print("homo_u", u)
+    print("homo_e", e)
     ctx = F.context(u) if use_u else F.context(e)
     dtype = F.dtype(u) if use_u else F.dtype(e)
     u_shp = F.shape(u) if use_u else (0,)
@@ -173,13 +174,14 @@ def _gspmm(gidx, op, reduce_op, u, e):
         arg_e = F.squeeze(arg_e, -1)
     return v, (arg_u, arg_e)
 
-def _gspmm_hetero(g, op, reduce_op, dict_u, e):
+def _gspmm_hetero(g, op, reduce_op, dict_u, dict_e):
     r""" Generalized Sparse Matrix Multiplication interface. 
     """
     print("SPMM for heterogeneous:")
     gidx = g._graph
     use_u = op != 'copy_rhs'
     use_e = op != 'copy_lhs'
+    print("op in gspmm, type", op, use_u, use_e)
     if use_u and use_e:
         if F.dtype(u) != F.dtype(e):
             raise DGLError("The node features' data type {} doesn't match edge"
@@ -189,25 +191,27 @@ def _gspmm_hetero(g, op, reduce_op, dict_u, e):
     expand_u, expand_e = False, False
     if use_u:
         for key in dict_u.keys():
-            u = dict_u[key]
-            if F.ndim(u) == 1:
-                u = F.unsqueeze(u, -1)
+            if F.ndim(dict_u[key]) == 1:
+                dict_u[key] = F.unsqueeze(dict_u[key], -1)
                 expand_u = True
     if use_e:
-        if F.ndim(e) == 1:
-            e = F.unsqueeze(e, -1)
-            expand_e = True
+        for key in dict_e.keys():
+            if F.ndim(dict_e[key]) == 1:
+                dict_e[key] = F.unsqueeze(dict_e[key], -1)
+                expand_e = True
 
     list_u = [None] * gidx.number_of_ntypes()
     list_v = [None] * gidx.number_of_ntypes()
-    list_dsttype = [None] * gidx.number_of_ntypes()
-    dict_v = {}
+    list_e = [None] * gidx.number_of_etypes()
 
-    print("use_u dict u", use_u, e)
+    print("dict_u", dict_u)
+    print("dict_e", dict_e)
 
     for srctype, etype, dsttype in g.canonical_etypes:
+        print("in loop ", srctype, etype, dsttype)
         etid = g.get_etype_id(etype)
-        u = None if use_u is False else dict_u[srctype]
+        u = dict_u[srctype] if use_u else None
+        e = dict_e[srctype, etype, dsttype] if use_e else None
 
         ctx = F.context(u) if use_u else F.context(e)
         dtype = F.dtype(u) if use_u else F.dtype(e)
@@ -217,11 +221,13 @@ def _gspmm_hetero(g, op, reduce_op, dict_u, e):
         src_id = g.get_ntype_id(srctype)
         dst_id = g.get_ntype_id(dsttype)
 
-        list_u[src_id] = to_dgl_nd(u if use_u else None)
+        if use_u:
+            list_u[src_id] = to_dgl_nd(u if use_u else None) 
+        if use_e:
+            list_e[etid] = to_dgl_nd(e if use_e else None) 
         v_shp = (gidx.number_of_nodes(dst_id), ) +\
             infer_broadcast_shape(op, u_shp[1:], e_shp[1:])
         list_v[dst_id] = to_dgl_nd_for_write(F.zeros(v_shp, dtype, ctx))
-        list_dsttype[dst_id] = dsttype # tmporary store dst_id to track the dsttype
     use_cmp = reduce_op in ['max', 'min']
     arg_u, arg_e = None, None
     idtype = getattr(F, gidx.dtype)
@@ -235,32 +241,25 @@ def _gspmm_hetero(g, op, reduce_op, dict_u, e):
 
     print("list_u", list_u)
     print("list_v", list_v)
+    print("list_e", list_e)
     if gidx.number_of_edges(0) > 0:
         _CAPI_DGLKernelSpMMHetero(gidx, op, reduce_op,
-                            list_u, #to_dgl_nd(u if use_u else None),
-                            to_dgl_nd(e if use_e else None),
+                            list_u if use_u else None, #to_dgl_nd(u if use_u else None),
+                            list_e if use_e else None,
                             list_v,
                             arg_u_nd,
                             arg_e_nd)
-    # NOTE(zihao): actually we can avoid the following step, because arg_*_nd
-    # refers to the data that stores arg_*. After we call _CAPI_DGLKernelSpMM,
-    # arg_* should have already been changed. But we found this doesn't work
-    # under Tensorflow when index type is int32. (arg_u and arg_e would be
-    # all zero).
-    # The workaround is proposed by Jinjing, and we still need to investigate
-    # where the problem is.
+    
     arg_u = None if arg_u is None else F.zerocopy_from_dgl_ndarray(arg_u_nd)
     arg_e = None if arg_e is None else F.zerocopy_from_dgl_ndarray(arg_e_nd)
     # To deal with scalar node/edge features.
-    # for l in range(len(list_v)):
-    #     list_v[l] = None if list_v[l] is None else F.zerocopy_from_dgl_ndarray(list_v[l])
 
-    out = (F.zerocopy_from_dgl_ndarray(list_v[1]), F.zerocopy_from_dgl_ndarray(list_v[2]))
-    # all(ele is None for ele in test_tup)
-    # out = all(v1 is None for v1 in list_v)
-    v = F.zerocopy_from_dgl_ndarray(list_v[1]) #returning this works
-    v = F.squeeze(v, -1)
-    print(out)
+    for l in range(len(list_v)):   
+        #replace None by empty tensor. Forward func doesn't accept None in tuple.
+        v = list_v[l]
+        v = torch.tensor([]) if v is None else F.zerocopy_from_dgl_ndarray(v)
+        list_v[l] = F.squeeze(v, -1)
+    out = tuple(list_v) # Israt: Is this expensive?
 
     # if (expand_u or not use_u) and (expand_e or not use_e):
     if expand_u and use_cmp:
@@ -346,6 +345,7 @@ def _gsddmm_hetero(g, op, lhs_dict, rhs_dict, lhs_target='u', rhs_target='v'):
     r""" Generalized Sampled-Dense-Dense Matrix Multiplication interface. 
     """
     print("SDDMM for heterogeneous:")
+    print("op in gsddmm, type", op, lhs_target, rhs_target)
     gidx = g._graph
     # if gidx.number_of_etypes() != 1:
     #     raise DGLError("We only support gsddmm on graph with one edge type")
@@ -372,14 +372,12 @@ def _gsddmm_hetero(g, op, lhs_dict, rhs_dict, lhs_target='u', rhs_target='v'):
                 expand_rhs = True
     lhs_target = target_mapping[lhs_target]
     rhs_target = target_mapping[rhs_target]
-    print('rhs target', rhs_target)
 
-    lhs_list = [None] * gidx.number_of_ntypes()
-    rhs_list = [None] * gidx.number_of_ntypes()
-    out_list = [None] * gidx.number_of_ntypes()
-    list_dsttype = [None] * gidx.number_of_ntypes()
-    dict_v = {}
-    print("calling gsddmm??!!")
+    lhs_list = [None] * gidx.number_of_etypes()
+    rhs_list = [None] * gidx.number_of_etypes()
+    out_list = [None] * gidx.number_of_etypes()
+
+    print("lhs_dict", lhs_dict)
     for srctype, etype, dsttype in g.canonical_etypes:
         etid = g.get_etype_id(etype)
         src_id = g.get_ntype_id(srctype)
@@ -393,7 +391,7 @@ def _gsddmm_hetero(g, op, lhs_dict, rhs_dict, lhs_target='u', rhs_target='v'):
         rhs_shp = F.shape(rhs) if use_rhs else (0,)
         lhs_list[src_id] = to_dgl_nd(lhs if use_lhs else None)
         rhs_list[src_id] = to_dgl_nd(rhs if use_rhs else None)
-        out_shp = (gidx.number_of_edges(dst_id), ) +\
+        out_shp = (gidx.number_of_edges(etid), ) +\
             infer_broadcast_shape(op, lhs_shp[1:], rhs_shp[1:])
         out_list[dst_id] = to_dgl_nd_for_write(F.zeros(out_shp, dtype, ctx))
 
@@ -404,10 +402,14 @@ def _gsddmm_hetero(g, op, lhs_dict, rhs_dict, lhs_target='u', rhs_target='v'):
                              out_list,
                              lhs_target, rhs_target)
     
-    out = (F.zerocopy_from_dgl_ndarray(out_list[1]))
-   
-    if (expand_lhs or not use_lhs) and (expand_rhs or not use_rhs):
-        out_list[1] = F.squeeze(out_list[1], -1)
+    for l in range(len(out_list)):   
+        #replace None by empty tensor. Forward func doesn't accept None in tuple.
+        e = out_list[l]
+        e = torch.tensor([]) if e is None else F.zerocopy_from_dgl_ndarray(e)
+        if (expand_lhs or not use_lhs) and (expand_rhs or not use_rhs):
+            e = F.squeeze(v, -1)
+        out_list[l] = e
+    out = tuple(out_list) 
     return out
 
 

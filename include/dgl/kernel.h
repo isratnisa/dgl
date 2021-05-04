@@ -54,7 +54,7 @@ void SpMMHetero(const std::string& op, const std::string& reduce,
            const BcastOff& bcast,
            const std::vector<CSRMatrix>& csr,
            std::vector<NDArray> ufeat,
-           NDArray efeat,
+           std::vector<NDArray> efeat,
            std::vector<NDArray> out,
            std::vector<NDArray> out_aux);
 

@@ -246,8 +246,8 @@ def invoke_gspmm(graph, mfunc, rfunc, *, srcdata=None, dstdata=None, edata=None)
     if dstdata is None:
         dstdata = graph.dstdata
     alldata = [srcdata, dstdata, edata]
-    print("srcdata : ", srcdata)
-    print("destdata : ", dstdata)
+    # print("srcdata : ", srcdata)
+    # print("destdata : ", dstdata)
     print("edata : ", edata)
     if isinstance(mfunc, fn.BinaryMessageFunction):
         x = alldata[mfunc.lhs][mfunc.lhs_field]
@@ -256,9 +256,11 @@ def invoke_gspmm(graph, mfunc, rfunc, *, srcdata=None, dstdata=None, edata=None)
         op = getattr(ops, '{}_{}'.format(mfunc.name, rfunc.name))
         z = op(graph, x, y)
     else:
+        print("outside binary else : ", mfunc.target, mfunc.in_field)
+        print("alldata",  alldata[mfunc.target])
         x = alldata[mfunc.target][mfunc.in_field]
         op = getattr(ops, '{}_{}'.format(mfunc.name, rfunc.name))
-        print("outside binary else : ", x, mfunc.target, mfunc.in_field)
+ 
         z = op(graph, x)
     return {rfunc.out_field : z}
 
@@ -283,22 +285,38 @@ def message_passing(g, mfunc, rfunc, afunc):
     """
     if (is_builtin(mfunc) and is_builtin(rfunc) and
             getattr(ops, '{}_{}'.format(mfunc.name, rfunc.name), None) is not None):
+        print("if msg_passing: fused mfunc")
         # invoke fused message passing
         ndata = invoke_gspmm(g, mfunc, rfunc)
     else:
         # invoke message passing in two separate steps
         # message phase
-
+        print("else msg_passing: NON fused mfunc")
         if is_builtin(mfunc):
-            print("msg_passing: mfunc else")
+            print("msg_passing: mfunc", mfunc.name)
             msgdata = invoke_gsddmm(g, mfunc)
+            print("out of sddmm", msgdata)
         else:
+            print("UDF??")
             orig_eid = g.edata.get(EID, None)
             msgdata = invoke_edge_udf(g, ALL, g.canonical_etypes[0], mfunc, orig_eid=orig_eid)
         # reduce phase
         if is_builtin(rfunc):
-            print("msg_passing: rfunc else")
+            print("msg_passing: rfunc ", rfunc.name)
+     
+            # print("msgdata ", msgdata['eid'])
+            if g._graph.number_of_etypes() > 1:
+                msgdata_dict = {}
+                msgdata = msgdata['m'] ##TODO. Dont hardcode
+                for srctype, etype, dsttype in g.canonical_etypes:
+                    print(srctype, etype, dsttype )
+                    eid = g.get_etype_id(etype)
+                    dst_id = g.get_ntype_id(dsttype)
+                    msgdata_dict[srctype, etype, dsttype] = msgdata[dst_id] #TODO:: indexing
+                msgdata_dict = dict(m=msgdata_dict)
+                msgdata = msgdata_dict
             msg = rfunc.msg_field
+
             ndata = invoke_gspmm(g, fn.copy_e(msg, msg), rfunc, edata=msgdata)
         else:
             orig_nid = g.dstdata.get(NID, None)

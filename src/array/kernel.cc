@@ -55,21 +55,24 @@ void SpMM(const std::string& op, const std::string& reduce,
 /*! \brief Generalized Sparse Matrix-Matrix Multiplication with hetero-graph support. */
 void SpMMHetero(const std::string& op, const std::string& reduce,
           HeteroGraphPtr graph,
-          std::vector<NDArray> ufeat,
-          NDArray efeat,
+          std::vector<NDArray> ufeat_vec,
+          std::vector<NDArray> efeat_vec,
           std::vector<NDArray> out,
           std::vector<NDArray> out_aux) {
-
   SparseFormat format = graph->SelectFormat(0, CSC_CODE);
-  const auto& bcast = CalcBcastOff(op, ufeat[0], efeat); //TODO: might be none
+  NDArray efeat = (efeat_vec.size() == 0) ? NullArray() : efeat_vec[0];
+  NDArray ufeat = (ufeat_vec.size() == 0) ? NullArray() : ufeat_vec[0];
+  const auto& bcast = CalcBcastOff(op, ufeat, efeat); //TODO: might be none
 
   std::vector<CSRMatrix> vec_graph;
   std::vector<dgl_type_t> ufeat_eid;
+  std::vector<dgl_type_t> efeat_eid;
   std::vector<dgl_type_t> out_eid;
   for (dgl_type_t etype = 0; etype < graph->NumEdgeTypes(); ++etype) {
     vec_graph.push_back(graph->GetCSCMatrix(etype));
     auto pair = graph->meta_graph()->FindEdge(etype); 
     ufeat_eid.push_back(pair.first);
+    efeat_eid.push_back(etype);
     out_eid.push_back(pair.second);
   }
   //TODO:: change it to ATEN_XPU_SWITCH_CUDA when cuda codes are modified 
@@ -79,12 +82,12 @@ void SpMMHetero(const std::string& op, const std::string& reduce,
         if (format == SparseFormat::kCSC) {
           SpMMCsrHetero<XPU, IdType, bits>(
               op, reduce, bcast, vec_graph,
-              ufeat, efeat, out, out_aux,
+              ufeat_vec, efeat_vec, out, out_aux,
               ufeat_eid, out_eid);
         } //else if (format == SparseFormat::kCOO) {
         //   SpMMCoo<XPU, IdType, bits>(
         //       op, reduce, bcast, graph->GetCOOMatrix(0),
-        //       ufeat, efeat, out, out_aux);
+        //       ufeat, vec_efeat, out, out_aux);
         // } 
         else {
           LOG(FATAL) << "SpMM only supports CSC foramt for heterpgraph";
@@ -327,30 +330,40 @@ DGL_REGISTER_GLOBAL("sparse._CAPI_DGLKernelSpMMHetero")
     const std::string op = args[1];
     const std::string reduce_op = args[2];
     List<Value> list_U = args[3];
-    NDArray E = args[4];
+    List<Value> list_E = args[4];
     List<Value> list_V = args[5];
     NDArray ArgU = args[6];
     NDArray ArgE = args[7];
     std::vector<NDArray> U_vec;
     std::vector<NDArray> V_vec;
-    CHECK_EQ(list_U.size(), list_V.size());
+    std::vector<NDArray> E_vec;
+    // CHECK_EQ(list_U.size(), list_V.size());
     U_vec.reserve(list_U.size());
     V_vec.reserve(list_V.size());
+    E_vec.reserve(list_E.size());
     for (Value val : list_U) {
       U_vec.push_back(val->data);
     }
     for (Value val : list_V) {
       V_vec.push_back(val->data);
     }
+    for (Value val : list_E) {
+      E_vec.push_back(val->data);
+    }
+
     for (dgl_type_t etype = 0; etype < graph->NumEdgeTypes(); ++etype) {
-      // CHECK_EQ(graph->NumEdgeTypes(), 1);
       auto pair = graph->meta_graph()->FindEdge(etype); 
-      const dgl_type_t src_id = pair.first;
-      const dgl_type_t dst_id = pair.second;
-      std::cout << src_id << " " << dst_id << std::endl;
-      CheckCtx(graph->Context(), {U_vec[src_id], E, V_vec[dst_id], ArgU, ArgE},
+      const dgl_id_t src_id = pair.first;
+      const dgl_id_t dst_id = pair.second;
+      NDArray U = (U_vec.size() == 0) ? NullArray() : U_vec[src_id];
+      NDArray E = (E_vec.size() == 0) ? NullArray() : E_vec[etype];
+     
+      std::cout << src_id << " MUST FIX TODO " << dst_id << " " << etype << std::endl; 
+   // 
+      // TODO:: E_vec index etype
+      CheckCtx(graph->Context(), {U, E, V_vec[dst_id], ArgU, ArgE},
           {"U_data", "E_data", "out", "Arg_U", "Arg_E"});
-      CheckContiguous({U_vec[src_id], E, V_vec[dst_id], ArgU, ArgE},
+      CheckContiguous({U, E, V_vec[dst_id], ArgU, ArgE},
           {"U_data", "E_data", "out", "Arg_U", "Arg_E"});
       // CheckShape(
       //     {graph->NumVertices(src_id), graph->NumEdges(etype), graph->NumVertices(dst_id)},
@@ -358,7 +371,7 @@ DGL_REGISTER_GLOBAL("sparse._CAPI_DGLKernelSpMMHetero")
       //     {U_vec[src_id], E, V_vec[dst_id], ArgU, ArgE},
       //     {"U_data", "E_data", "out", "Arg_U", "Arg_E"});
     }
-    SpMMHetero(op, reduce_op, graph.sptr(), U_vec, E, V_vec, {ArgU, ArgE});
+    SpMMHetero(op, reduce_op, graph.sptr(), U_vec, E_vec, V_vec, {ArgU, ArgE});
   });
 
 DGL_REGISTER_GLOBAL("sparse._CAPI_DGLKernelSDDMM")
