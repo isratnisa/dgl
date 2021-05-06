@@ -70,10 +70,10 @@ def gsddmm(g, op, lhs_data_dict, rhs_data_dict, lhs_target='u', rhs_target='v'):
             print("not homo", g.ntypes, g.etypes)
             for srctype, etype, dsttype in g.canonical_etypes:
                 lhs_data = lhs_data_dict[srctype]
-                rhs_data = rhs_data_dict[srctype]
+                rhs_data = rhs_data_dict[dsttype]
                 lhs_data, rhs_data = reshape(lhs_data, rhs_data)
                 lhs_data_dict[srctype] = lhs_data
-                rhs_data_dict[srctype] = rhs_data
+                rhs_data_dict[dsttype] = rhs_data
     return gsddmm_internal(
         g, op, lhs_data_dict, rhs_data_dict, lhs_target, rhs_target)
 

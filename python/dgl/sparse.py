@@ -129,8 +129,8 @@ def _gspmm(gidx, op, reduce_op, u, e):
         if F.ndim(e) == 1:
             e = F.unsqueeze(e, -1)
             expand_e = True
-    print("homo_u", u)
-    print("homo_e", e)
+    print("homo: dict_u", u)
+    print("homo: dict_e", e)
     ctx = F.context(u) if use_u else F.context(e)
     dtype = F.dtype(u) if use_u else F.dtype(e)
     u_shp = F.shape(u) if use_u else (0,)
@@ -166,6 +166,7 @@ def _gspmm(gidx, op, reduce_op, u, e):
     arg_u = None if arg_u is None else F.zerocopy_from_dgl_ndarray(arg_u_nd)
     arg_e = None if arg_e is None else F.zerocopy_from_dgl_ndarray(arg_e_nd)
     # To deal with scalar node/edge features.
+    print("homo: out", v)
     if (expand_u or not use_u) and (expand_e or not use_e):
         v = F.squeeze(v, -1)
     if expand_u and use_cmp:
@@ -208,7 +209,6 @@ def _gspmm_hetero(g, op, reduce_op, dict_u, dict_e):
     print("dict_e", dict_e)
 
     for srctype, etype, dsttype in g.canonical_etypes:
-        print("in loop ", srctype, etype, dsttype)
         etid = g.get_etype_id(etype)
         u = dict_u[srctype] if use_u else None
         e = dict_e[srctype, etype, dsttype] if use_e else None
@@ -239,9 +239,6 @@ def _gspmm_hetero(g, op, reduce_op, dict_u, dict_e):
     arg_u_nd = to_dgl_nd_for_write(arg_u)
     arg_e_nd = to_dgl_nd_for_write(arg_e)
 
-    print("list_u", list_u)
-    print("list_v", list_v)
-    print("list_e", list_e)
     if gidx.number_of_edges(0) > 0:
         _CAPI_DGLKernelSpMMHetero(gidx, op, reduce_op,
                             list_u if use_u else None, #to_dgl_nd(u if use_u else None),
@@ -260,12 +257,13 @@ def _gspmm_hetero(g, op, reduce_op, dict_u, dict_e):
         v = torch.tensor([]) if v is None else F.zerocopy_from_dgl_ndarray(v)
         list_v[l] = F.squeeze(v, -1)
     out = tuple(list_v) # Israt: Is this expensive?
-
+    print("hetero: out",  out)
     # if (expand_u or not use_u) and (expand_e or not use_e):
     if expand_u and use_cmp:
         arg_u = F.squeeze(arg_u, -1)
     if expand_e and use_cmp:
         arg_e = F.squeeze(arg_e, -1)
+
     return out, (arg_u, arg_e)
 
 def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):
@@ -322,6 +320,8 @@ def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):
         if F.ndim(rhs) == 1:
             rhs = F.unsqueeze(rhs, -1)
             expand_rhs = True
+    print("lhs_homo", lhs)
+    print("rhs_homo", rhs)
     lhs_target = target_mapping[lhs_target]
     rhs_target = target_mapping[rhs_target]
     ctx = F.context(lhs) if use_lhs else F.context(rhs)
@@ -373,24 +373,25 @@ def _gsddmm_hetero(g, op, lhs_dict, rhs_dict, lhs_target='u', rhs_target='v'):
     lhs_target = target_mapping[lhs_target]
     rhs_target = target_mapping[rhs_target]
 
-    lhs_list = [None] * gidx.number_of_etypes()
-    rhs_list = [None] * gidx.number_of_etypes()
-    out_list = [None] * gidx.number_of_etypes()
+    lhs_list = [None] * gidx.number_of_ntypes()
+    rhs_list = [None] * gidx.number_of_ntypes()
+    out_list = [None] * gidx.number_of_ntypes()
 
     print("lhs_dict", lhs_dict)
+    print("rhs_dict", rhs_dict)
     for srctype, etype, dsttype in g.canonical_etypes:
         etid = g.get_etype_id(etype)
         src_id = g.get_ntype_id(srctype)
         dst_id = g.get_ntype_id(dsttype)
         lhs = lhs_dict[srctype]
-        rhs = rhs_dict[srctype]
+        rhs = rhs_dict[dsttype]
         
         ctx = F.context(lhs) if use_lhs else F.context(rhs)
         dtype = F.dtype(lhs) if use_lhs else F.dtype(rhs)
         lhs_shp = F.shape(lhs) if use_lhs else (0,)
         rhs_shp = F.shape(rhs) if use_rhs else (0,)
         lhs_list[src_id] = to_dgl_nd(lhs if use_lhs else None)
-        rhs_list[src_id] = to_dgl_nd(rhs if use_rhs else None)
+        rhs_list[dst_id] = to_dgl_nd(rhs if use_rhs else None)
         out_shp = (gidx.number_of_edges(etid), ) +\
             infer_broadcast_shape(op, lhs_shp[1:], rhs_shp[1:])
         out_list[dst_id] = to_dgl_nd_for_write(F.zeros(out_shp, dtype, ctx))

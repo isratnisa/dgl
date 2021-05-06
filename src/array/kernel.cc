@@ -140,7 +140,7 @@ void SDDMMHetero(const std::string& op,
            int rhs_target) {
   // TODO(Israt): change it to COO_CODE
   SparseFormat format = graph->SelectFormat(0, CSR_CODE);
-  const auto &bcast = CalcBcastOff(op, lhs[0], rhs[0]);
+
   std::vector<CSRMatrix> vec_csr;
   std::vector<dgl_type_t> lhs_eid;
   std::vector<dgl_type_t> out_eid;
@@ -150,6 +150,7 @@ void SDDMMHetero(const std::string& op,
     lhs_eid.push_back(pair.first);
     out_eid.push_back(pair.second);
   }
+  const auto &bcast = CalcBcastOff(op, lhs[lhs_eid[0]], rhs[out_eid[0]]);
 
   //TODO:: change it to ATEN_XPU_SWITCH_CUDA when cuda codes are modified 
   ATEN_XPU_SWITCH(graph->Context().device_type, XPU, "SDDMM", {
@@ -409,7 +410,6 @@ DGL_REGISTER_GLOBAL("sparse._CAPI_DGLKernelSDDMMHetero")
     int lhs_target = args[5];
     int rhs_target = args[6];
     
-    std::cout << "after. declare " << std::endl;
     // CHECK_EQ(list_U.size(), list_V.size());
     std::vector<NDArray> vec_lhs;
     std::vector<NDArray> vec_rhs;
@@ -437,8 +437,7 @@ DGL_REGISTER_GLOBAL("sparse._CAPI_DGLKernelSDDMMHetero")
 
       const dgl_type_t src_id = pair.first;
       const dgl_type_t dst_id = pair.second;
-      std::cout << "afea " << src_id << " " << dst_id << std::endl;
-     
+    
       // CheckShape(
       //     {graph->NumVertices(src_id), graph->NumEdges(etype), graph->NumVertices(dst_id)},
       //     {lhs_target, rhs_target, 1},

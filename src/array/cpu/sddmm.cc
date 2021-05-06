@@ -95,7 +95,7 @@ void SDDMMCsrHetero(const std::string& op,
           const dgl_type_t dst_id = out_eid[etype];
           CSRMatrix csr = vec_csr[etype];
           NDArray lhs = vec_lhs[src_id];
-          NDArray rhs = vec_rhs[src_id];
+          NDArray rhs = vec_rhs[dst_id];
           NDArray out = vec_out[dst_id];
           cpu::SDDMMCsr<IdType, DType, Op, LhsTarget, RhsTarget>(bcast, csr, lhs, rhs, out);
         }
