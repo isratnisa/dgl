@@ -4,10 +4,22 @@ import sys
 from ..backend import gspmm as gspmm_internal
 from .. import backend as F
 
-__all__ = ['gspmm']
+__all__ = ['reshape', 'gspmm']
 
+def reshape(lhs_data, rhs_data):
+    lhs_shape = F.shape(lhs_data)
+    rhs_shape = F.shape(rhs_data)
+    if len(lhs_shape) != len(rhs_shape):
+        max_ndims = max(len(lhs_shape), len(rhs_shape))
+        lhs_pad_ndims = max_ndims - len(lhs_shape)
+        rhs_pad_ndims = max_ndims - len(rhs_shape)
+        new_lhs_shape = (lhs_shape[0],) + (1,) * lhs_pad_ndims + lhs_shape[1:]
+        new_rhs_shape = (rhs_shape[0],) + (1,) * rhs_pad_ndims + rhs_shape[1:]
+        lhs_data = F.reshape(lhs_data, new_lhs_shape)
+        rhs_data = F.reshape(rhs_data, new_rhs_shape)
+    return lhs_data, rhs_data
 
-def gspmm(g, op, reduce_op, lhs_data, rhs_data):
+def gspmm(g, op, reduce_op, lhs_data_dict, rhs_data_dict):
     r""" Generalized Sparse Matrix Multiplication interface.
     It fuses two steps into one kernel.
 
@@ -48,20 +60,22 @@ def gspmm(g, op, reduce_op, lhs_data, rhs_data):
         # number of dimensions. For example, given two shapes (N, 3, 1), (E, 5, 3, 4)
         # that are valid broadcastable shapes, change them to (N, 1, 3, 1) and
         # (E, 5, 3, 4)
-        lhs_shape = F.shape(lhs_data)
-        rhs_shape = F.shape(rhs_data)
-        if len(lhs_shape) != len(rhs_shape):
-            max_ndims = max(len(lhs_shape), len(rhs_shape))
-            lhs_pad_ndims = max_ndims - len(lhs_shape)
-            rhs_pad_ndims = max_ndims - len(rhs_shape)
-            new_lhs_shape = (lhs_shape[0],) + (1,) * lhs_pad_ndims + lhs_shape[1:]
-            new_rhs_shape = (rhs_shape[0],) + (1,) * rhs_pad_ndims + rhs_shape[1:]
-            lhs_data = F.reshape(lhs_data, new_lhs_shape)
-            rhs_data = F.reshape(rhs_data, new_rhs_shape)
+        if type(lhs_data_dict) is not dict: 
+            lhs_data, rhs_data = reshape(lhs_data_dict, rhs_data_dict)
+            lhs_data_dict = lhs_data
+            rhs_data_dict = rhs_data
+        #hard coded dict keys
+        else: #reshaping all tensors in dict
+            for srctype, etype, dsttype in g.canonical_etypes:
+                lhs_data = lhs_data_dict[srctype]
+                rhs_data = rhs_data_dict[srctype]
+                lhs_data, rhs_data = reshape(lhs_data, rhs_data)
+                lhs_data_dict[srctype] = lhs_data
+                rhs_data_dict[srctype] = rhs_data
     # With max and min reducers infinity will be returned for zero degree nodes
     ret = gspmm_internal(g, op,
                          'sum' if reduce_op == 'mean' else reduce_op,
-                         lhs_data, rhs_data)
+                         lhs_data_dict, rhs_data_dict)
     # Replace infinity with zero for isolated nodes when reducer is min/max
     if reduce_op in ['min', 'max']:
         ret = F.replace_inf_with_zero(ret)

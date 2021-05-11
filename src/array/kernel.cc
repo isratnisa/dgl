@@ -60,9 +60,6 @@ void SpMMHetero(const std::string& op, const std::string& reduce,
           std::vector<NDArray> out,
           std::vector<NDArray> out_aux) {
   SparseFormat format = graph->SelectFormat(0, CSC_CODE);
-  NDArray efeat = (efeat_vec.size() == 0) ? NullArray() : efeat_vec[0];
-  NDArray ufeat = (ufeat_vec.size() == 0) ? NullArray() : ufeat_vec[0];
-  const auto& bcast = CalcBcastOff(op, ufeat, efeat); //TODO: might be none
 
   std::vector<CSRMatrix> vec_graph;
   std::vector<dgl_type_t> ufeat_eid;
@@ -75,6 +72,10 @@ void SpMMHetero(const std::string& op, const std::string& reduce,
     efeat_eid.push_back(etype);
     out_eid.push_back(pair.second);
   }
+  NDArray efeat = (efeat_vec.size() == 0) ? NullArray() : efeat_vec[efeat_eid[0]];
+  NDArray ufeat = (ufeat_vec.size() == 0) ? NullArray() : ufeat_vec[ufeat_eid[0]];
+  const auto& bcast = CalcBcastOff(op, ufeat, efeat); //TODO: might be none
+
   //TODO:: change it to ATEN_XPU_SWITCH_CUDA when cuda codes are modified 
   ATEN_XPU_SWITCH(graph->Context().device_type, XPU, "SpMM", {
     ATEN_ID_TYPE_SWITCH(graph->DataType(), IdType, {
@@ -358,10 +359,6 @@ DGL_REGISTER_GLOBAL("sparse._CAPI_DGLKernelSpMMHetero")
       const dgl_id_t dst_id = pair.second;
       NDArray U = (U_vec.size() == 0) ? NullArray() : U_vec[src_id];
       NDArray E = (E_vec.size() == 0) ? NullArray() : E_vec[etype];
-     
-      std::cout << src_id << " MUST FIX TODO " << dst_id << " " << etype << std::endl; 
-   // 
-      // TODO:: E_vec index etype
       CheckCtx(graph->Context(), {U, E, V_vec[dst_id], ArgU, ArgE},
           {"U_data", "E_data", "out", "Arg_U", "Arg_E"});
       CheckContiguous({U, E, V_vec[dst_id], ArgU, ArgE},

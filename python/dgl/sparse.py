@@ -129,8 +129,8 @@ def _gspmm(gidx, op, reduce_op, u, e):
         if F.ndim(e) == 1:
             e = F.unsqueeze(e, -1)
             expand_e = True
-    print("homo: dict_u", u)
-    print("homo: dict_e", e)
+    # print("homo: dict_u", u)
+    # print("homo: dict_e", e)
     ctx = F.context(u) if use_u else F.context(e)
     dtype = F.dtype(u) if use_u else F.dtype(e)
     u_shp = F.shape(u) if use_u else (0,)
@@ -166,7 +166,7 @@ def _gspmm(gidx, op, reduce_op, u, e):
     arg_u = None if arg_u is None else F.zerocopy_from_dgl_ndarray(arg_u_nd)
     arg_e = None if arg_e is None else F.zerocopy_from_dgl_ndarray(arg_e_nd)
     # To deal with scalar node/edge features.
-    print("homo: out", v)
+    # print("homo: out", v)
     if (expand_u or not use_u) and (expand_e or not use_e):
         v = F.squeeze(v, -1)
     if expand_u and use_cmp:
@@ -182,7 +182,6 @@ def _gspmm_hetero(g, op, reduce_op, dict_u, dict_e):
     gidx = g._graph
     use_u = op != 'copy_rhs'
     use_e = op != 'copy_lhs'
-    print("op in gspmm, type", op, use_u, use_e)
     if use_u and use_e:
         if F.dtype(u) != F.dtype(e):
             raise DGLError("The node features' data type {} doesn't match edge"
@@ -190,7 +189,15 @@ def _gspmm_hetero(g, op, reduce_op, dict_u, dict_e):
                            " same type.".format(F.dtype(u), F.dtype(e)))
     # deal with scalar features.
     expand_u, expand_e = False, False
+    
+    # multiple etypes and one src type
+    tmp_u = {}
+    if  use_u and type(dict_u) is not dict:
+        tmp_u[g.srctypes[0]] = dict_u
+        dict_u = tmp_u
+    
     if use_u:
+        # if type(lhs_data_dict) is not dict:
         for key in dict_u.keys():
             if F.ndim(dict_u[key]) == 1:
                 dict_u[key] = F.unsqueeze(dict_u[key], -1)
@@ -204,9 +211,6 @@ def _gspmm_hetero(g, op, reduce_op, dict_u, dict_e):
     list_u = [None] * gidx.number_of_ntypes()
     list_v = [None] * gidx.number_of_ntypes()
     list_e = [None] * gidx.number_of_etypes()
-
-    print("dict_u", dict_u)
-    print("dict_e", dict_e)
 
     for srctype, etype, dsttype in g.canonical_etypes:
         etid = g.get_etype_id(etype)
@@ -257,7 +261,7 @@ def _gspmm_hetero(g, op, reduce_op, dict_u, dict_e):
         v = torch.tensor([]) if v is None else F.zerocopy_from_dgl_ndarray(v)
         list_v[l] = F.squeeze(v, -1)
     out = tuple(list_v) # Israt: Is this expensive?
-    print("hetero: out",  out)
+   
     # if (expand_u or not use_u) and (expand_e or not use_e):
     if expand_u and use_cmp:
         arg_u = F.squeeze(arg_u, -1)
@@ -320,8 +324,8 @@ def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):
         if F.ndim(rhs) == 1:
             rhs = F.unsqueeze(rhs, -1)
             expand_rhs = True
-    print("lhs_homo", lhs)
-    print("rhs_homo", rhs)
+    # print("lhs_homo", lhs)
+    # print("rhs_homo", rhs)
     lhs_target = target_mapping[lhs_target]
     rhs_target = target_mapping[rhs_target]
     ctx = F.context(lhs) if use_lhs else F.context(rhs)
@@ -345,15 +349,26 @@ def _gsddmm_hetero(g, op, lhs_dict, rhs_dict, lhs_target='u', rhs_target='v'):
     r""" Generalized Sampled-Dense-Dense Matrix Multiplication interface. 
     """
     print("SDDMM for heterogeneous:")
-    print("op in gsddmm, type", op, lhs_target, rhs_target)
     gidx = g._graph
     # if gidx.number_of_etypes() != 1:
     #     raise DGLError("We only support gsddmm on graph with one edge type")
     use_lhs = op != 'copy_rhs'
     use_rhs = op != 'copy_lhs'
+
+    # multiple etypes and one src/dest node type
+    tmp_u = {}
+    if  use_lhs and type(lhs_dict) is not dict:
+        tmp_u[g.srctypes[0]] = lhs_dict
+        lhs_dict = tmp_u
+    
+    tmp_v = {}
+    if  use_rhs and type(rhs_dict) is not dict:
+        tmp_v[g.dsttypes[0]] = rhs_dict
+        rhs_dict = tmp_v
+
     if use_lhs and use_rhs:
         for srctype, etype, dsttype in g.canonical_etypes:
-            if F.dtype(lhs_dict[srctype]) != F.dtype(rhs_dict[srctype]):
+            if F.dtype(lhs_dict[srctype]) != F.dtype(rhs_dict[dsttype]):
                 raise DGLError("The operands data type don't match: {} and {}, please convert them"
                                " to the same type.".format(F.dtype(lhs_dict[srctype]), F.dtype(rhs_dict[srctype])))
     # deal with scalar features.
@@ -377,8 +392,8 @@ def _gsddmm_hetero(g, op, lhs_dict, rhs_dict, lhs_target='u', rhs_target='v'):
     rhs_list = [None] * gidx.number_of_ntypes()
     out_list = [None] * gidx.number_of_ntypes()
 
-    print("lhs_dict", lhs_dict)
-    print("rhs_dict", rhs_dict)
+    # print("lhs_dict", lhs_dict)
+    # print("rhs_dict", rhs_dict)
     for srctype, etype, dsttype in g.canonical_etypes:
         etid = g.get_etype_id(etype)
         src_id = g.get_ntype_id(srctype)
