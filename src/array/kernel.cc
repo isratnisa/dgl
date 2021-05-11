@@ -144,24 +144,24 @@ void SDDMMHetero(const std::string& op,
 
   std::vector<CSRMatrix> vec_csr;
   std::vector<dgl_type_t> lhs_eid;
-  std::vector<dgl_type_t> out_eid;
+  std::vector<dgl_type_t> rhs_eid;
   for (dgl_type_t etype = 0; etype < graph->NumEdgeTypes(); ++etype) {
     vec_csr.push_back(graph->GetCSRMatrix(etype));
     auto pair = graph->meta_graph()->FindEdge(etype); 
     lhs_eid.push_back(pair.first);
-    out_eid.push_back(pair.second);
+    rhs_eid.push_back(pair.second);
   }
-  const auto &bcast = CalcBcastOff(op, lhs[lhs_eid[0]], rhs[out_eid[0]]);
+  const auto &bcast = CalcBcastOff(op, lhs[lhs_eid[0]], rhs[rhs_eid[0]]);
 
   //TODO:: change it to ATEN_XPU_SWITCH_CUDA when cuda codes are modified 
   ATEN_XPU_SWITCH(graph->Context().device_type, XPU, "SDDMM", {
     ATEN_ID_TYPE_SWITCH(graph->DataType(), IdType, {
-      ATEN_FLOAT_BITS_SWITCH(out[out_eid[0]]->dtype, bits, "Feature data", {
+      ATEN_FLOAT_BITS_SWITCH(out[rhs_eid[0]]->dtype, bits, "Feature data", { //TODO index
         if (format == SparseFormat::kCSR) {
           SDDMMCsrHetero<XPU, IdType, bits>(
               op, bcast, vec_csr,
               lhs, rhs, out, lhs_target, rhs_target,
-              lhs_eid, out_eid);
+              lhs_eid, rhs_eid);
         // } else if (format == SparseFormat::kCOO) {
         //   SDDMMCoo<XPU, IdType, bits>(
         //       op, bcast, graph->GetCOOMatrix(0),

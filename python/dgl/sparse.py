@@ -109,7 +109,7 @@ def _gspmm(gidx, op, reduce_op, u, e):
     -----
     This function does not handle gradients.
     """
-    print("SPMM for homogeneous:")
+    # print("SPMM for homogeneous:")
     if gidx.number_of_etypes() != 1:
         raise DGLError("We only support gspmm on graph with one edge type")
     use_u = op != 'copy_rhs'
@@ -178,7 +178,7 @@ def _gspmm(gidx, op, reduce_op, u, e):
 def _gspmm_hetero(g, op, reduce_op, dict_u, dict_e):
     r""" Generalized Sparse Matrix Multiplication interface. 
     """
-    print("SPMM for heterogeneous:")
+    # print("SPMM for heterogeneous:")
     gidx = g._graph
     use_u = op != 'copy_rhs'
     use_e = op != 'copy_lhs'
@@ -305,7 +305,7 @@ def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):
     -----
     This function does not handle gradients.
     """
-    print("SDDMM for homogeneous:")
+    # print("SDDMM for homogeneous:")
     if gidx.number_of_etypes() != 1:
         raise DGLError("We only support gsddmm on graph with one edge type")
     use_lhs = op != 'copy_rhs'
@@ -348,7 +348,7 @@ def _gsddmm(gidx, op, lhs, rhs, lhs_target='u', rhs_target='v'):
 def _gsddmm_hetero(g, op, lhs_dict, rhs_dict, lhs_target='u', rhs_target='v'):
     r""" Generalized Sampled-Dense-Dense Matrix Multiplication interface. 
     """
-    print("SDDMM for heterogeneous:")
+    # print("SDDMM for heterogeneous:")
     gidx = g._graph
     # if gidx.number_of_etypes() != 1:
     #     raise DGLError("We only support gsddmm on graph with one edge type")
@@ -390,10 +390,8 @@ def _gsddmm_hetero(g, op, lhs_dict, rhs_dict, lhs_target='u', rhs_target='v'):
 
     lhs_list = [None] * gidx.number_of_ntypes()
     rhs_list = [None] * gidx.number_of_ntypes()
-    out_list = [None] * gidx.number_of_ntypes()
+    out_list = [None] * gidx.number_of_etypes()
 
-    # print("lhs_dict", lhs_dict)
-    # print("rhs_dict", rhs_dict)
     for srctype, etype, dsttype in g.canonical_etypes:
         etid = g.get_etype_id(etype)
         src_id = g.get_ntype_id(srctype)
@@ -409,7 +407,7 @@ def _gsddmm_hetero(g, op, lhs_dict, rhs_dict, lhs_target='u', rhs_target='v'):
         rhs_list[dst_id] = to_dgl_nd(rhs if use_rhs else None)
         out_shp = (gidx.number_of_edges(etid), ) +\
             infer_broadcast_shape(op, lhs_shp[1:], rhs_shp[1:])
-        out_list[dst_id] = to_dgl_nd_for_write(F.zeros(out_shp, dtype, ctx))
+        out_list[etid] = to_dgl_nd_for_write(F.zeros(out_shp, dtype, ctx))
 
     if gidx.number_of_edges(0) > 0:
         _CAPI_DGLKernelSDDMMHetero(gidx, op,
