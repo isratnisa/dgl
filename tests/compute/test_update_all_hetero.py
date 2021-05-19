@@ -11,6 +11,7 @@ from dgl import DGLError
 import test_utils
 from test_utils import parametrize_dtype, get_cases
 from scipy.sparse import rand
+import torch
 
 def create_test_heterograph(idtype):
     # test heterograph from the docstring, plus a user -- wishes -- game relation
@@ -22,10 +23,10 @@ def create_test_heterograph(idtype):
     #    ('developer', 'develops', 'game')])
 
     g = dgl.heterograph({
-        ('user', 'follows', 'user'): ([0, 1], [1, 2]),
-        ('user', 'plays', 'game'): ([0, 1, 2, 1], [0, 0, 1, 1]),
-        ('user', 'wishes', 'game'): ([0, 2], [1, 0]),
-        ('developer', 'develops', 'game'): ([0, 1], [0, 1])
+        ('user', 'follows', 'game'):  ([0, 1, 2, 1], [0, 0, 1, 1]),
+        # ('user', 'plays', 'game'): ([0, 1, 2, 1], [0, 0, 1, 1]),
+        ('user', 'wishes', 'game'): ([0, 1, 1], [0, 0, 1]),
+        # ('developer', 'develops', 'game'): ([0, 1, 0], [0, 1, 1])
     }, idtype=idtype, device=F.ctx())
     assert g.idtype == idtype
     assert g.device == F.ctx()
@@ -102,12 +103,6 @@ def get_redfn(name):
 
 @parametrize_dtype
 def test_level2(idtype):
-    #edges = {
-    #    'follows': ([0, 1], [1, 2]),
-    #    'plays': ([0, 1, 2, 1], [0, 0, 1, 1]),
-    #    'wishes': ([0, 2], [1, 0]),
-    #    'develops': ([0, 1], [0, 1]),
-    #}
     g = create_test_heterograph(idtype)
     def rfunc(nodes):
         return {'y': F.sum(nodes.mailbox['m'], 1)}
@@ -121,15 +116,88 @@ def test_level2(idtype):
     #############################################################
     #  update_all
     #############################################################
-    g.nodes['user'].data['h'] = F.ones((3, 2))
-    g.nodes['game'].data['w'] = F.ones((2, 2))
-    g.nodes['developer'].data['h'] = F.ones((2, 1))
-    # g['plays'].update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'h'))
-    print(g)
-    g.update_all_new(fn.copy_e('h', 'm'), fn.sum('m', 'h'))
-    # will require modifying invoke_sddmm
+    feat = 50
+    demo_g = dgl.graph(
+        ([1, 3, 5, 0, 4, 2, 3, 3, 4, 5], [1, 1, 0, 0, 1, 2, 2, 0, 3, 3]),
+        idtype=idtype, device=F.ctx())
+    # demo_g.edata['eid'] = torch.full((10, 2), 1.0)
+
+    g.nodes['user'].data['h'] = F.ones((3,2)) #torch.full((3, 2),2.0)
+    g.nodes['game'].data['h'] = F.ones((2,2)) #torch.full((2, 2) , 3.0)
+    # g.nodes['developer'].data['h'] = torch.full((2, 2) ,5.0)
+    # g['plays'].edata['eid'] = F.ones((4,2)) #torch.full((4, 2), 5.0)
+    g['follows'].edata['eid'] =  F.ones((4,2)) #torch.full((4, 2), 10.0)
+    # g['develops'].edata['eid'] =  torch.full((3, 2), 20.0)
+    g['wishes'].edata['eid'] = F.ones((3,2)) #torch.full((3, 2), 15.0)
+    
+    # # copy_u
+    # out = g.multi_update_all(
+    #     # {'plays' : (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+    #     # 'follows': (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+    #    {('user', 'follows', 'game'): (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+    #     ('user', 'plays', 'game'): (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+    #     ('user', 'wishes', 'game'): (fn.copy_u('h', 'm'), fn.sum('m', 'y'))},
+    #     'sum')
+    # print("multi_update_all: copy_u: ", out)
+    # print(" ")
+    # print("Starting update all new:")
+    # out = g.update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'y'))
+    # print("update_all_new: copy_u: ", out)
+
+    # # copy_e
+    # out = g.multi_update_all(
+    #     # {'plays' : (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+    #     # 'follows': (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+    #     {('user', 'follows', 'game'): (fn.copy_e('eid', 'm'), fn.sum('m', 'y')),
+    #     ('user', 'wishes', 'game'): (fn.copy_e('eid', 'm'), fn.sum('m', 'y'))},
+    #     'sum')
+    # print("multi_update_all: copy_u: ", out)
+    # print(" ")
+    # print("Starting update all new:")
+    # out = g.update_all_new(fn.copy_e('eid', 'm'), fn.sum('m', 'y'))
+
+
+    # u_mul_v
+    g.multi_update_all(
+        # {'plays' : (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+        # 'follows': (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+        {('user', 'follows', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y')),
+        # ('user', 'plays', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y')),
+        ('user', 'wishes', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y'))},
+        # ('developer', 'develops', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y'))},
+        'sum')
+    print(" ")
+    print("Starting update all new:")
+    g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y'))
+
+    # # u_mul_e
+    # g.multi_update_all(
+    #     # {'plays' : (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+    #     # 'follows': (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+    #     {('user', 'follows', 'user'): (fn.u_mul_e('h', 'eid', 'm'), fn.sum('m', 'y')),
+    #     # ('user', 'plays', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y')),
+    #     ('developer', 'develops', 'game'): (fn.u_mul_e('h', 'eid', 'm'), fn.sum('m', 'y'))},
+    #     'sum')
+    # print(" ")
+    # print("Starting update all new:")
+    # g.update_all_new(fn.u_mul_e('h', 'eid', 'm'), fn.sum('m', 'y'))
+
+    # print(g)
+    # demo_g.update_all(fn.copy_e('eid', 'm'), fn.sum('m', 'h'))
+    # g['plays'].update_all(fn.copy_e('eid', 'm'), fn.sum('m', 'h'), etype='plays')
+    # g.update_all_new(fn.copy_e('eid', 'm'), fn.sum('m', 'eid'))
+   
+    # g.update_all_new(fn.copy_e('eid', 'm'), fn.sum('m', 'eid'))
+  
+    # # g['plays'].update_all(mfunc, rfunc, etype='plays')
+    # g.multi_update_all(mfunc, rfunc)
+    # print("update all new: u_mul_v: ", h)
+
+    # g['plays'].update_all(fn.u_mul_v('h', 'w', 'm'), fn.sum('m', 'h')) 
     # g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'h')) 
-    # g.update_all(mfunc, rfunc, etype='plays')
+    # print("update all new: u_mul_v: ", h)
+    # g['plays'].update_all(mfunc, rfunc, etype='plays')
+    # g.update_all_new(mfunc, rfunc)
     # g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'h')) 
 
 

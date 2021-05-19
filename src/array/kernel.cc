@@ -77,10 +77,11 @@ void SpMMHetero(const std::string& op, const std::string& reduce,
   const auto& bcast = CalcBcastOff(op, ufeat, efeat); //TODO: might be none
 
   //TODO:: change it to ATEN_XPU_SWITCH_CUDA when cuda codes are modified 
-  ATEN_XPU_SWITCH(graph->Context().device_type, XPU, "SpMM", {
+  ATEN_XPU_SWITCH_CUDA(graph->Context().device_type, XPU, "SpMM", {
     ATEN_ID_TYPE_SWITCH(graph->DataType(), IdType, {
       ATEN_FLOAT_BITS_SWITCH(out[out_eid[0]]->dtype, bits, "Feature data", {
         if (format == SparseFormat::kCSC) {
+          printf("Calling heteri\n");
           SpMMCsrHetero<XPU, IdType, bits>(
               op, reduce, bcast, vec_graph,
               ufeat_vec, efeat_vec, out, out_aux,
@@ -154,7 +155,7 @@ void SDDMMHetero(const std::string& op,
   const auto &bcast = CalcBcastOff(op, lhs[lhs_eid[0]], rhs[rhs_eid[0]]);
 
   //TODO:: change it to ATEN_XPU_SWITCH_CUDA when cuda codes are modified 
-  ATEN_XPU_SWITCH(graph->Context().device_type, XPU, "SDDMM", {
+  ATEN_XPU_SWITCH_CUDA(graph->Context().device_type, XPU, "SDDMM", {
     ATEN_ID_TYPE_SWITCH(graph->DataType(), IdType, {
       ATEN_FLOAT_BITS_SWITCH(out[rhs_eid[0]]->dtype, bits, "Feature data", { //TODO index
         if (format == SparseFormat::kCSR) {
@@ -167,7 +168,7 @@ void SDDMMHetero(const std::string& op,
         //       op, bcast, graph->GetCOOMatrix(0),
         //       lhs, rhs, out, lhs_target, rhs_target);
         } else {
-          LOG(FATAL) << "SDDMM only supports CSR and COO foramts";
+          LOG(FATAL) << "SDDMM only supports CSR foramts";
         }
       });
     });
