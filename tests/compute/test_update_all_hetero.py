@@ -23,79 +23,13 @@ def create_test_heterograph(idtype):
     #    ('developer', 'develops', 'game')])
 
     g = dgl.heterograph({
-        ('user', 'follows', 'game'):  ([0, 1, 2, 1], [0, 0, 1, 1]),
-        # ('user', 'plays', 'game'): ([0, 1, 2, 1], [0, 0, 1, 1]),
+        ('user', 'follows', 'user'):  ([0, 1, 2, 1], [0, 0, 1, 1]),
+        ('user', 'plays', 'game'): ([0, 1, 2, 1], [0, 0, 1, 1]),
         ('user', 'wishes', 'game'): ([0, 1, 1], [0, 0, 1]),
-        # ('developer', 'develops', 'game'): ([0, 1, 0], [0, 1, 1])
+        ('developer', 'develops', 'game'): ([0, 1, 0], [0, 1, 1]),
     }, idtype=idtype, device=F.ctx())
     assert g.idtype == idtype
     assert g.device == F.ctx()
-    return g
-
-def create_test_heterograph1(idtype):
-    edges = []
-    edges.extend([(0, 1), (1, 2)])  # follows
-    edges.extend([(0, 3), (1, 3), (2, 4), (1, 4)])  # plays
-    edges.extend([(0, 4), (2, 3)])  # wishes
-    edges.extend([(5, 3), (6, 4)])  # develops
-    edges = tuple(zip(*edges))
-    ntypes = F.tensor([0, 0, 0, 1, 1, 2, 2])
-    etypes = F.tensor([0, 0, 1, 1, 1, 1, 2, 2, 3, 3])
-    g0 = dgl.graph(edges, idtype=idtype, device=F.ctx())
-    g0.ndata[dgl.NTYPE] = ntypes
-    g0.edata[dgl.ETYPE] = etypes
-    return dgl.to_heterogeneous(g0, ['user', 'game', 'developer'],
-                                ['follows', 'plays', 'wishes', 'develops'])
-
-def create_test_heterograph2(idtype):
-    g = dgl.heterograph({
-        ('user', 'follows', 'user'): ([0, 1], [1, 2]),
-        ('user', 'plays', 'game'): ([0, 1, 2, 1], [0, 0, 1, 1]),
-        ('user', 'wishes', 'game'): ([0, 2], [1, 0]),
-        ('developer', 'develops', 'game'): ([0, 1], [0, 1]),
-        }, idtype=idtype, device=F.ctx())
-    assert g.idtype == idtype
-    assert g.device == F.ctx()
-    return g
-
-def create_test_heterograph3(idtype):
-    g = dgl.heterograph({
-        ('user', 'plays', 'game'): (F.tensor([0, 1, 1, 2], dtype=idtype),
-                                    F.tensor([0, 0, 1, 1], dtype=idtype)),
-        ('developer', 'develops', 'game'): (F.tensor([0, 1], dtype=idtype),
-                                            F.tensor([0, 1], dtype=idtype))},
-        idtype=idtype, device=F.ctx())
-
-    g.nodes['user'].data['h'] = F.copy_to(F.tensor([1, 1, 1], dtype=idtype), ctx=F.ctx())
-    g.nodes['game'].data['h'] = F.copy_to(F.tensor([2, 2], dtype=idtype), ctx=F.ctx())
-    g.nodes['developer'].data['h'] = F.copy_to(F.tensor([3, 3], dtype=idtype), ctx=F.ctx())
-    g.edges['plays'].data['h'] = F.copy_to(F.tensor([1, 1, 1, 1], dtype=idtype), ctx=F.ctx())
-    return g
-
-def create_test_heterograph4(idtype):
-    g = dgl.heterograph({
-        ('user', 'follows', 'user'): (F.tensor([0, 1, 1, 2, 2, 2], dtype=idtype),
-                                      F.tensor([0, 0, 1, 1, 2, 2], dtype=idtype)),
-        ('user', 'plays', 'game'): (F.tensor([0, 1], dtype=idtype),
-                                    F.tensor([0, 1], dtype=idtype))},
-        idtype=idtype, device=F.ctx())
-    g.nodes['user'].data['h'] = F.copy_to(F.tensor([1, 1, 1], dtype=idtype), ctx=F.ctx())
-    g.nodes['game'].data['h'] = F.copy_to(F.tensor([2, 2], dtype=idtype), ctx=F.ctx())
-    g.edges['follows'].data['h'] = F.copy_to(F.tensor([1, 2, 3, 4, 5, 6], dtype=idtype), ctx=F.ctx())
-    g.edges['plays'].data['h'] = F.copy_to(F.tensor([1, 2], dtype=idtype), ctx=F.ctx())
-    return g
-
-def create_test_heterograph5(idtype):
-    g = dgl.heterograph({
-        ('user', 'follows', 'user'): (F.tensor([1, 2], dtype=idtype),
-                                      F.tensor([0, 1], dtype=idtype)),
-        ('user', 'plays', 'game'): (F.tensor([0, 1], dtype=idtype),
-                                    F.tensor([0, 1], dtype=idtype))},
-        idtype=idtype, device=F.ctx())
-    g.nodes['user'].data['h'] = F.copy_to(F.tensor([1, 1, 1], dtype=idtype), ctx=F.ctx())
-    g.nodes['game'].data['h'] = F.copy_to(F.tensor([2, 2], dtype=idtype), ctx=F.ctx())
-    g.edges['follows'].data['h'] = F.copy_to(F.tensor([1, 2], dtype=idtype), ctx=F.ctx())
-    g.edges['plays'].data['h'] = F.copy_to(F.tensor([1, 2], dtype=idtype), ctx=F.ctx())
     return g
 
 def get_redfn(name):
@@ -116,189 +50,111 @@ def test_level2(idtype):
     #############################################################
     #  update_all
     #############################################################
-    feat = 50
+    feat_size = 2
     demo_g = dgl.graph(
         ([1, 3, 5, 0, 4, 2, 3, 3, 4, 5], [1, 1, 0, 0, 1, 2, 2, 0, 3, 3]),
         idtype=idtype, device=F.ctx())
     # demo_g.edata['eid'] = torch.full((10, 2), 1.0)
 
-    g.nodes['user'].data['h'] = F.ones((3,2)) #torch.full((3, 2),2.0)
-    g.nodes['game'].data['h'] = F.ones((2,2)) #torch.full((2, 2) , 3.0)
-    # g.nodes['developer'].data['h'] = torch.full((2, 2) ,5.0)
-    # g['plays'].edata['eid'] = F.ones((4,2)) #torch.full((4, 2), 5.0)
-    g['follows'].edata['eid'] =  F.ones((4,2)) #torch.full((4, 2), 10.0)
-    # g['develops'].edata['eid'] =  torch.full((3, 2), 20.0)
-    g['wishes'].edata['eid'] = F.ones((3,2)) #torch.full((3, 2), 15.0)
-    
+    # g.nodes['user'].data['h'] = torch.randn(
+    #     (g.num_nodes('user'), feat_size), device=F.ctx())
+    # g.nodes['game'].data['h'] = torch.randn(
+    #     (g.num_nodes('game'), feat_size), device=F.ctx())
+    # F.ones((3,2)) #torch.full((3, 2),2.0)
+
+    x1 = F.ones((g.num_nodes('user'), feat_size)) #torch.full((g.num_nodes('game'), feat_size), 2.0)
+    x2 = F.ones((g.num_nodes('developer'), feat_size)) #torch.full((g.num_nodes('game'), feat_size), 2.0)
+   
+    # x2 = torch.full((g.num_nodes('user'), feat_size) , 3.0)
+    F.attach_grad(x1)
+    F.attach_grad(x2)
+    g.nodes['user'].data['h'] = x1
+    # g.nodes['user'].data['h'] = torch.full((g.num_nodes('user'), feat_size) ,3.0)
+   
+    g.nodes['developer'].data['h'] = x2 #torch.full((g.num_nodes('developer'), feat_size) ,5.0)
+    g['plays'].edata['eid'] = F.ones((4,2)) #torch.full((4, 2), 5.0)
+    g['follows'].edata['eid'] =  F.ones((4,feat_size)) #torch.full((4, 2), 10.0)
+    g['develops'].edata['eid'] = F.ones((3,feat_size)) # torch.full((3, 2), 20.0)
+    g['wishes'].edata['eid'] = F.ones((3,feat_size)) #torch.full((3, 2), 15.0)
+    rfunc = fn.sum('m', 'y')
+ 
     # # copy_u
-    # out = g.multi_update_all(
-    #     # {'plays' : (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
-    #     # 'follows': (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
-    #    {('user', 'follows', 'game'): (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
-    #     ('user', 'plays', 'game'): (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
-    #     ('user', 'wishes', 'game'): (fn.copy_u('h', 'm'), fn.sum('m', 'y'))},
+    # # with F.record_grad():
+    # g.multi_update_all(
+    #     {'plays' : (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+    #     'follows': (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+    #     'develops': (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+    #     'wishes': (fn.copy_u('h', 'm'), fn.sum('m', 'y'))},
     #     'sum')
-    # print("multi_update_all: copy_u: ", out)
+    # y = g.nodes['game'].data['y']
+    # print('y ' , y)
+
+    # F.backward(y, F.ones(y.shape))
+    
+    ### Hetero graph #####
     # print(" ")
     # print("Starting update all new:")
-    # out = g.update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'y'))
-    # print("update_all_new: copy_u: ", out)
+    # # # with F.record_grad():
+    # g.update_all_new(fn.copy_u('h', 'm'), fn.sum('m', 'y')) 
+    # y = g.nodes['game'].data['y']
+    # print('y',  y)
+    # F.backward(y, F.ones(y.shape))
 
-    # # copy_e
-    # out = g.multi_update_all(
+# # @parametrize_dtype
+# def test_backward(idtype):
+#     g = create_test_heterograph1(idtype)
+#     x = F.randn((3, 2))
+#     F.attach_grad(x)
+#     g.nodes['user'].data['h'] = x
+#     with F.record_grad():
+#         g.multi_update_all(
+#             {'plays' : (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
+#              'wishes': (fn.copy_u('h', 'm'), fn.sum('m', 'y'))},
+#             'sum')
+#         y = g.nodes['game'].data['y']
+#         F.backward(y, F.ones(y.shape))
+# #     # print(F.grad(x))
+# #     # assert F.array_equal(F.grad(x), F.tensor([[2., 2., 2., 2., 2.],
+# #     #                                           [2., 2., 2., 2., 2.],
+             
+
+
+    # copy_e
+    # g.multi_update_all(
     #     # {'plays' : (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
     #     # 'follows': (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
     #     {('user', 'follows', 'game'): (fn.copy_e('eid', 'm'), fn.sum('m', 'y')),
     #     ('user', 'wishes', 'game'): (fn.copy_e('eid', 'm'), fn.sum('m', 'y'))},
     #     'sum')
-    # print("multi_update_all: copy_u: ", out)
-    # print(" ")
-    # print("Starting update all new:")
-    # out = g.update_all_new(fn.copy_e('eid', 'm'), fn.sum('m', 'y'))
+    print(" ")
+    print("Starting update all new:")
+    g.update_all_new(fn.copy_e('eid', 'm'), fn.sum('m', 'y'))
+    # y = g.nodes['game'].data['y']
 
 
     # u_mul_v
-    g.multi_update_all(
-        # {'plays' : (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
-        # 'follows': (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
-        {('user', 'follows', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y')),
-        # ('user', 'plays', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y')),
-        ('user', 'wishes', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y'))},
-        # ('developer', 'develops', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y'))},
-        'sum')
-    print(" ")
-    print("Starting update all new:")
-    g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y'))
-
-    # # u_mul_e
+    # x = F.randn((3, 5))
+    # F.attach_grad(x)
     # g.multi_update_all(
     #     # {'plays' : (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
     #     # 'follows': (fn.copy_u('h', 'm'), fn.sum('m', 'y')),
-    #     {('user', 'follows', 'user'): (fn.u_mul_e('h', 'eid', 'm'), fn.sum('m', 'y')),
-    #     # ('user', 'plays', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y')),
-    #     ('developer', 'develops', 'game'): (fn.u_mul_e('h', 'eid', 'm'), fn.sum('m', 'y'))},
+    #     {('user', 'follows', 'user'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y')),
+    #     ('user', 'plays', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y')),
+    #     ('user', 'wishes', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y')),
+    #     ('developer', 'develops', 'game'): (fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y'))},
     #     'sum')
+    # y = g.nodes['game'].data['y']
+    # F.backward(y, F.ones(y.shape))
+    # print(F.grad(x))
+    # assert F.array_equal(F.grad(x), F.tensor([[2., 2., 2., 2., 2.],
+    #                                           [2., 2., 2., 2., 2.],
+    #                                           [2., 2., 2., 2., 2.]]))
+
+
     # print(" ")
     # print("Starting update all new:")
-    # g.update_all_new(fn.u_mul_e('h', 'eid', 'm'), fn.sum('m', 'y'))
+    # g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'y'))
 
-    # print(g)
-    # demo_g.update_all(fn.copy_e('eid', 'm'), fn.sum('m', 'h'))
-    # g['plays'].update_all(fn.copy_e('eid', 'm'), fn.sum('m', 'h'), etype='plays')
-    # g.update_all_new(fn.copy_e('eid', 'm'), fn.sum('m', 'eid'))
-   
-    # g.update_all_new(fn.copy_e('eid', 'm'), fn.sum('m', 'eid'))
-  
-    # # g['plays'].update_all(mfunc, rfunc, etype='plays')
-    # g.multi_update_all(mfunc, rfunc)
-    # print("update all new: u_mul_v: ", h)
-
-    # g['plays'].update_all(fn.u_mul_v('h', 'w', 'm'), fn.sum('m', 'h')) 
-    # g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'h')) 
-    # print("update all new: u_mul_v: ", h)
-    # g['plays'].update_all(mfunc, rfunc, etype='plays')
-    # g.update_all_new(mfunc, rfunc)
-    # g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'h')) 
-
-
-    # g.nodes['user'].data['h'] = F.ones((3, 2))
-    # g.update_all(mfunc, rfunc, etype='plays')
-    # y = g.nodes['game'].data['y']
-    # assert F.array_equal(y, F.tensor([[2., 2.], [2., 2.]]))
-
-    # # only one type
-    # g['plays'].update_all(mfunc, rfunc)
-    # y = g.nodes['game'].data['y']
-    # assert F.array_equal(y, F.tensor([[2., 2.], [2., 2.]]))
-
-    # # test fail case
-    # # fail due to multiple types
-    # with pytest.raises(DGLError):
-    #     g.update_all(mfunc, rfunc)
-
-    # # test multi
-    # g.multi_update_all(
-    #     {'plays' : (mfunc, rfunc),
-    #      ('user', 'wishes', 'game'): (mfunc, rfunc2)},
-    #     'sum')
-
-    # g.update_all(mfunc, rfunc, etype='plays')
-    # y = g.nodes['game'].data['y']
-    # assert F.array_equal(y, F.tensor([[2., 2.], [2., 2.]]))
-
-
-    # for (src_type, rel_type, dst_type) in g.canonical_etypes:
-    #     g.nodes[src_type].data[‘h’] = F.ones((3, 2))
-    #     g.update_all(mfunc, rfunc, etype=rel_type)
-    #     y = g.nodes[dst_type].data[‘y’]
-    
-
-    # only one type
-    # g['plays'].update_all(mfunc, rfunc)
-    # y = g.nodes['game'].data['y']
-    # assert F.array_equal(y, F.tensor([[2., 2.], [2., 2.]]))
-
-    # test fail case
-    # fail due to multiple types
-
-    # with pytest.raises(DGLError):
-    #     g.update_all(mfunc, rfunc)
-
-    # def multi_update_all(self, etype_dict, cross_reducer, apply_node_func=None):
-    # test multi
-    # g.multi_update_all(
-    #     {'plays' : (mfunc, rfunc),
-    #      ('user', 'wishes', 'game'): (mfunc, rfunc2)},
-    #     'sum')
-    # assert F.array_equal(g.nodes['game'].data['y'], F.tensor([[3., 3.], [3., 3.]]))
-       
-    # >>> g.multi_update_all(
-    # ...     {'follows': (fn.copy_src('h', 'm'), fn.sum('m', 'h')),
-    # ...      'attracts': (fn.copy_src('h', 'm'), fn.sum('m', 'h'))},
-    # ... "sum")
-    # 
-
-    # will require modifying invoke_sddmm
-    # g.update_all_new(fn.u_mul_v('h', 'h', 'm'), fn.sum('m', 'h')) 
-
-
-    # g.multi_update_all(
-    #     {'plays' : (mfunc, rfunc, afunc),
-    #      ('user', 'wishes', 'game'): (mfunc, rfunc2)},
-    #     'sum', afunc)
-    # assert F.array_equal(g.nodes['game'].data['y'], F.tensor([[5., 5.], [5., 5.]]))
-
-    # test cross reducer
-    # g.nodes['user'].data['h'] = F.randn((3, 2))
-    # for cred in ['sum', 'max', 'min', 'mean', 'stack']:
-    #     g.multi_update_all(
-    #         {'plays' : (mfunc, rfunc, afunc),
-    #          'wishes': (mfunc, rfunc2)},
-    #         cred, afunc)
-    #     y = g.nodes['game'].data['y']
-    #     g['plays'].update_all(mfunc, rfunc, afunc)
-    #     y1 = g.nodes['game'].data['y']
-    #     g['wishes'].update_all(mfunc, rfunc2)
-    #     y2 = g.nodes['game'].data['y']
-    #     if cred == 'stack':
-    #         # stack has an internal order by edge type id
-    #         yy = F.stack([y1, y2], 1)
-    #         yy = yy + 1  # final afunc
-    #         assert F.array_equal(y, yy)
-    #     else:
-    #         yy = get_redfn(cred)(F.stack([y1, y2], 0), 0)
-    #         yy = yy + 1  # final afunc
-    #         assert F.array_equal(y, yy)
-
-    # test fail case
-    # fail because cannot infer ntype
-    # with pytest.raises(DGLError):
-    #     g.update_all(
-    #         {'plays' : (mfunc, rfunc),
-    #          'follows': (mfunc, rfunc2)},
-    #         'sum')
-
-    g.nodes['game'].data.clear()
 
 # @parametrize_dtype
 # def test_updates(idtype):
@@ -361,7 +217,7 @@ def test_level2(idtype):
 #                                               [2., 2., 2., 2., 2.]]))
 
 
-# @parametrize_dtype
+# # @parametrize_dtype
 # def test_empty_heterograph(idtype):
 #     def assert_empty(g):
 #         assert g.number_of_nodes('user') == 0

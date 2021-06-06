@@ -24,7 +24,7 @@ else:
             return bwd(*args, **kwargs)
         return decorate_bwd
 
-__all__ = ['gspmm', 'gsddmm', 'edge_softmax', 'segment_reduce', 'scatter_add']
+__all__ = ['gspmm', 'gspmm_hetero', 'gsddmm', 'gsddmm_hetero', 'edge_softmax', 'segment_reduce', 'scatter_add']
 
 
 def _reduce_grad(grad, shape):
@@ -83,21 +83,15 @@ def _expand(x, shape):
 class GSpMM(th.autograd.Function):
     @staticmethod
     @custom_fwd(cast_inputs=th.float16)
-    def forward(ctx, g, op, reduce_op, X, Y):
-        if g._graph.number_of_etypes() > 1:
-            print("X not a dict. Calling hetero SpMM")
-            out, (argX, argY) = _gspmm_hetero(g, op, reduce_op, X, Y)
-        else:
-            print("X not a dict. Calling homo SpMM")
-            out, (argX, argY) = _gspmm(g._graph, op, reduce_op, X, Y)
-        ctx.backward_cache = g._graph, op, reduce_op
+    def forward(ctx, gidx, op, reduce_op, X, Y):
+        out, (argX, argY) = _gspmm(gidx, op, reduce_op, X, Y)
+        ctx.backward_cache = gidx, op, reduce_op
         ctx.save_for_backward(X, Y, argX, argY)
         return out
 
     @staticmethod
     @custom_bwd
     def backward(ctx, dZ):
-        print("In backward")
         gidx, op, reduce_op = ctx.backward_cache
         X, Y, argX, argY = ctx.saved_tensors
         if op != 'copy_rhs' and ctx.needs_input_grad[3]:
@@ -148,7 +142,138 @@ class GSpMM(th.autograd.Function):
         return None, None, None, dX, dY
 
 
+class GSpMM_hetero(th.autograd.Function):
+    @staticmethod
+    @custom_fwd(cast_inputs=th.float16)
+    def forward(ctx, g, op, reduce_op, *X):
+        out, (argX, argY) = _gspmm_hetero(g, op, reduce_op, X)
+        ctx.backward_cache = g, op, reduce_op # g._graph
+        ctx.save_for_backward(*X, argX, argY)
+        return out
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, *dZ):
+        print("In backward")
+        g, op, reduce_op = ctx.backward_cache 
+        X = ctx.saved_tensors[:-2]
+        argX=ctx.saved_tensors[-2]  
+        argY=ctx.saved_tensors[-1]  
+
+        if op != 'copy_rhs' and ctx.needs_input_grad[3]:
+            g_rev = g.reverse() #gidx.reverse()
+            if reduce_op == 'sum':
+                if op in ['mul', 'div']:
+                    dX = gspmm_hetero(g_rev, 'mul', 'sum', dZ, _muldiv(op, Y))
+                elif op in ['add', 'sub']:
+                    dX = gspmm_hetero(g_rev, 'copy_lhs', 'sum', dZ, Y)
+                elif op == 'copy_lhs':
+                    dX = gspmm_hetero(g_rev, 'copy_lhs', 'sum', *dZ, None)
+            else:  # max/min
+                dX = th.zeros((X.shape[0],) + dZ.shape[1:],
+                              dtype=X.dtype, device=X.device)
+                if op in ['mul', 'div']:
+                    grad = _muldiv(op, _expand(Y, dZ.shape[1:]).gather(
+                        0, argY.long())) * dZ
+                    dX.scatter_add_(0, argX.long(), grad)
+                elif op in ['add', 'sub', 'copy_lhs']:
+                    dX.scatter_add_(0, argX.long(), dZ)
+            print("Backward:: DX: ", dX)
+            dX = tuple([_reduce_grad(dX[i], X[i].shape) if X[i] is not None else None 
+                for i in range(len(X))])
+        else:  # X has not gradient
+            dX = None
+        if op != 'copy_lhs' and ctx.needs_input_grad[4]:
+            if reduce_op == 'sum':
+                if op == 'mul' and _need_reduce_last_dim(X, Y):
+                    dY = gsddmm_hetero(gidx, 'dot', X, dZ)
+                elif op in ['mul', 'div']:
+                    dY = gsddmm_hetero(gidx, 'mul', X, dZ)
+                    if op == 'div':
+                        dY = -dY / (Y ** 2)
+                elif op in ['add', 'sub', 'copy_rhs']:
+                    dY = gsddmm_hetero(gidx, 'copy_rhs', X, _addsub(op, dZ))
+            else:  # max/min
+                dY = th.zeros((Y.shape[0],) + dZ.shape[1:],
+                              dtype=Y.dtype, device=Y.device)
+                if op in ['mul',  'div']:
+                    grad = _expand(X, dZ.shape[1:]).gather(
+                        0, argX.long()) * dZ
+                    dY.scatter_add_(0, argY.long(), grad)
+                    if op == 'div':
+                        dY = -dY / (Y ** 2)
+                elif op in ['add', 'sub', 'copy_rhs']:
+                    dY.scatter_add_(0, argY.long(), _addsub(op, dZ))
+            dY = _reduce_grad(dY, Y.shape)
+        else:  # Y has no gradient
+            dY = None
+        print("DX, DY: ", dX, dY)
+        return (None, None, None) + dX
+        # return None, None, None, dX
+
+
 class GSDDMM(th.autograd.Function):
+    @staticmethod
+    @custom_fwd(cast_inputs=th.float16)
+    def forward(ctx, gidx, op, X, Y, lhs_target, rhs_target):
+        out = _gsddmm(gidx, op, X, Y, lhs_target, rhs_target)
+        ctx.backward_cache = gidx, op, lhs_target, rhs_target
+        ctx.save_for_backward(X, Y)
+        return out
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, dZ):
+        gidx, op, lhs_target, rhs_target = ctx.backward_cache
+        X, Y = ctx.saved_tensors
+        if op != 'copy_rhs' and ctx.needs_input_grad[2]:
+            if lhs_target in ['u', 'v']:
+                _gidx = gidx if lhs_target == 'v' else gidx.reverse()
+                if op in ['add', 'sub', 'copy_lhs']:
+                    dX = gspmm(_gidx, 'copy_rhs', 'sum', None, dZ)
+                else:  # mul, div, dot
+                    if rhs_target == lhs_target:
+                        dX = gspmm(_gidx, 'copy_rhs', 'sum', None, dZ) * _muldiv(op, Y)
+                    elif rhs_target == 'e':
+                        dX = gspmm(_gidx, 'copy_rhs', 'sum', None, dZ * _muldiv(op, Y))
+                    else:  # rhs_target = !lhs_target
+                        dX = gspmm(_gidx, 'mul', 'sum', _muldiv(op, Y), dZ)
+            else:  # lhs_target == 'e'
+                if op in ['add', 'sub', 'copy_lhs']:
+                    dX = dZ
+                else:  # mul, div, dot
+                    dX = gsddmm(gidx, 'mul', dZ, _muldiv(op, Y), 'e', rhs_target)
+            dX = _reduce_grad(dX, X.shape)
+        else:
+            dX = None
+        if op != 'copy_lhs' and ctx.needs_input_grad[3]:
+            if rhs_target in ['u', 'v']:
+                _gidx = gidx if rhs_target == 'v' else gidx.reverse()
+                if op in ['add', 'sub', 'copy_rhs']:
+                    dY = gspmm(_gidx, 'copy_rhs', 'sum', None, _addsub(op, dZ))
+                else:  # mul, div, dot
+                    if lhs_target == rhs_target:
+                        dY = gspmm(_gidx, 'copy_rhs', 'sum', None, dZ) * X
+                    elif lhs_target == 'e':
+                        dY = gspmm(_gidx, 'copy_rhs', 'sum', None, dZ * X)
+                    else:  # rhs_target = !lhs_target
+                        dY = gspmm(_gidx, 'mul', 'sum', X, dZ)
+                    if op == 'div':
+                        dY = -dY / (Y ** 2)
+            else:
+                if op in ['add', 'sub', 'copy_rhs']:
+                    dY = _addsub(op, dZ)
+                else:  # mul, div, dot
+                    dY = gsddmm(gidx, 'mul', dZ, X, 'e', lhs_target)
+                    if op == 'div':
+                        dY = -dY / (Y ** 2)
+            dY = _reduce_grad(dY, Y.shape)
+        else:
+            dY = None
+        return None, None, dX, dY, None, None
+
+
+class GSDDMM_hetero(th.autograd.Function):
     @staticmethod
     @custom_fwd(cast_inputs=th.float16)
     def forward(ctx, g, op, X, Y, lhs_target, rhs_target):
@@ -312,11 +437,17 @@ class ScatterAdd(th.autograd.Function):
         return dy[idx], None, None
 
 
-def gspmm(g, op, reduce_op, lhs_data, rhs_data):
-    return GSpMM.apply(g, op, reduce_op, lhs_data, rhs_data)
+def gspmm(gidx, op, reduce_op, lhs_data, rhs_data):
+    return GSpMM.apply(gidx, op, reduce_op, lhs_data, rhs_data)
 
 def gsddmm(gidx, op, lhs_data, rhs_data, lhs_target='u', rhs_target='v'):
     return GSDDMM.apply(gidx, op, lhs_data, rhs_data, lhs_target, rhs_target)
+
+def gspmm_hetero(g, op, reduce_op, *lhs_data):
+    return GSpMM_hetero.apply(g, op, reduce_op, *lhs_data)
+
+def gsddmm_hetero(gidx, op, lhs_data, rhs_data, lhs_target='u', rhs_target='v'):
+    return GSDDMM_hetero.apply(gidx, op, lhs_data, rhs_data, lhs_target, rhs_target)
 
 def edge_softmax(gidx, logits, eids=ALL, norm_by='dst'):
     return EdgeSoftmax.apply(gidx, logits, eids, norm_by)

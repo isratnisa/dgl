@@ -1064,6 +1064,7 @@ class DGLHeteroGraph(object):
                 raise DGLError('Edge type name must be specified if there are more than one '
                                'edge types.')
             etype = self.etypes[0]
+
         if isinstance(etype, tuple):
             return etype
         else:
@@ -4761,6 +4762,7 @@ class DGLHeteroGraph(object):
         """
         all_out = defaultdict(list)
         merge_order = defaultdict(list)
+
         for etype, args in etype_dict.items():
             etid = self.get_etype_id(etype)
             _, dtid = self._graph.metagraph.find_edge(etid)
@@ -4770,8 +4772,10 @@ class DGLHeteroGraph(object):
                                '(msg_func, reduce_func, [apply_node_func])'.format(etype))
             mfunc, rfunc, afunc = args
             g = self if etype is None else self[etype]
-            all_out[dtid].append(core.message_passing(g, mfunc, rfunc, afunc))
+            dat = core.message_passing(g, mfunc, rfunc, afunc)
+            all_out[dtid].append(dat)
             merge_order[dtid].append(etid)  # use edge type id as merge order hint
+        # print("all_out ", all_out)
         for dtid, frames in all_out.items():
             # merge by cross_reducer
             self._node_frames[dtid].update(
@@ -4779,7 +4783,7 @@ class DGLHeteroGraph(object):
             # apply
             if apply_node_func is not None:
                 self.apply_nodes(apply_node_func, ALL, self.ntypes[dtid])
-
+        # print("after ", g.ndata)
 
     #################################################################
     # New Message passing on heterograph // will replace *update_all
@@ -4789,30 +4793,20 @@ class DGLHeteroGraph(object):
                    rfunc,
                    afunc=None,
                    etype=None):
-    # def update_all_new(self, mfunc, rfunc, afunc=None, etype=None):
-        """Send messages along all the edges, reduce them by first type-wisely
-        """
-        print("mfunc: ", mfunc, "rfunc: ", rfunc, "afunc: ", afunc)
-        # all_out = [] #= defaultdict(list)
-        # merge_order = defaultdict(list)
-        # for etype, args in etype_dict.items():
-        #     etid = self.get_etype_id(etype)
-        #     _, dtid = self._graph.metagraph.find_edge(etid)
-        #     args = pad_tuple(args, 3)
-        #     if args is None:
-        #         raise DGLError('Invalid arguments for edge type "{}". Should be '
-        #                        '(msg_func, reduce_func, [apply_node_func])'.format(etype))
-        #     mfunc, rfunc, afunc = args
-        g = self #if etype is None else self[etype]
 
-            # all_out[dtid].append(core.message_passing(g, mfunc, rfunc, afunc))
+        g = self 
         all_out = core.message_passing(g, mfunc, rfunc, afunc)
-        print("all_out", all_out)
-            # merge_order[dtid].append(etid)  # use edge type id as merge order hint
-        # for dtid, frames in all_out.items():
-        #     # merge by cross_reducer
-        #     self._node_frames[dtid].update(
-        #         reduce_dict_data(frames, cross_reducer, merge_order[dtid]))
+        # print("hetero out message pass ", all_out)
+        key = list(all_out.keys())[0]
+        out_tensor_tuples = all_out[key]
+
+        dst_tensor = {}
+        for _, _, dsttype in g.canonical_etypes:
+            dtid = g.get_ntype_id(dsttype)
+            dst_tensor[key]=out_tensor_tuples[dtid]
+            self._node_frames[dtid].update(dst_tensor)
+        #  TODO(Israt): add aggr
+        # print("after ", g.ndata)
         #     # apply
         #     if apply_node_func is not None:
         #         self.apply_nodes(apply_node_func, ALL, self.ntypes[dtid])
@@ -5972,6 +5966,7 @@ def reduce_dict_data(frames, reducer, order=None):
             if k in frm:
                 flist.append(frm[k])
         ret[k] = merger(flist)
+    print("merged: ", ret)
     return ret
 
 def combine_frames(frames, ids, col_names=None):
