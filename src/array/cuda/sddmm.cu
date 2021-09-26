@@ -112,15 +112,20 @@ void SDDMMCsrHetero(const std::string& op,
   SWITCH_BITS(bits, DType, {
     SWITCH_OP(op, Op, {
       SWITCH_TARGET(lhs_target, rhs_target, LhsTarget, RhsTarget, {
-        /* Call  SDDMM for each relation type */
-        for (dgl_type_t etype = 0; etype < lhs_eid.size(); ++etype) {
-          CSRMatrix csr = vec_csr[etype];
-          NDArray lhs = vec_lhs[lhs_eid[etype]];
-          NDArray rhs = vec_rhs[rhs_eid[etype]];
-          NDArray out = vec_out[etype];
-          cuda::SDDMMCsrHetero<IdType, DType, Op, LhsTarget, RhsTarget>(
-            bcast, csr, lhs, rhs, out, thr_entry->stream);
-        }
+        /* Call SDDMM for all relation types */
+        cuda::SDDMMCsrHetero_mergedEtypes<IdType, DType, Op, LhsTarget, RhsTarget>(
+              bcast, vec_csr,
+              vec_lhs, vec_rhs, vec_out,
+              lhs_eid, rhs_eid, thr_entry->stream);
+        /* Call SDDMM for each relation type */
+        // for (dgl_type_t etype = 0; etype < lhs_eid.size(); ++etype) {
+        //   CSRMatrix csr = vec_csr[etype];
+        //   NDArray lhs = vec_lhs[lhs_eid[etype]];
+        //   NDArray rhs = vec_rhs[rhs_eid[etype]];
+        //   NDArray out = vec_out[etype];
+        //   cuda::SDDMMCsrHetero<IdType, DType, Op, LhsTarget, RhsTarget>(
+        //     bcast, csr, lhs, rhs, out, thr_entry->stream);
+        // }
       });
     });
   });

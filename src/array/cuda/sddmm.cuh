@@ -193,6 +193,57 @@ __global__ void SDDMMCsrKernel(
 }
 
 /*!
+ * \brief CUDA kernel of g-SDDMM on Csr format.
+ * \note it uses edge parallel strategy, different threadblocks (on y-axis)
+ *       is responsible for the computation on different edges. Threadblocks
+ *       on the x-axis are responsible for the computation on different positions
+ *       in feature dimension.
+ *       To efficiently find the source node idx and destination node index of an
+ *       given edge on Csr format, it uses binary search (time complexity O(log N)).
+ */
+template <typename Idx, typename DType, typename BinaryOp,
+          bool UseBcast = false, bool UseIdx = false,
+          int LhsTarget = 0, int RhsTarget = 2>
+__global__ void SDDMMCsrKernel_MergedEtypes(
+  const DType* __restrict__ lhs,
+  const DType* __restrict__ rhs,
+  DType* __restrict__ out,
+  const Idx* __restrict__ indptr,
+  const Idx* __restrict__ indices,
+  const Idx* __restrict__ edge_map,
+  int64_t N, int64_t M, int64_t E, int64_t reduce_size,
+  const int64_t* __restrict__ lhs_off,
+  const int64_t* __restrict__ rhs_off,
+  int64_t lhs_len, int64_t rhs_len, int64_t out_len) {
+  // SDDMM with Csr.
+  Idx ty = blockIdx.y * blockDim.y + threadIdx.y;
+  const Idx stride_y = blockDim.y * gridDim.y;
+  while (ty < E) {
+    const Idx src = BinarySearchSrc<Idx>(indptr, N + 1, ty);
+    const Idx dst = _ldg(indices + ty);
+    const Idx eid = UseIdx ? _ldg(edge_map + ty) : ty;
+    int64_t tx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t stride_x = blockDim.x * gridDim.x;
+    const DType* lhsoff = BinaryOp::use_lhs ?
+      (lhs + Selector<LhsTarget>::Call(src, eid, dst) * lhs_len): nullptr;
+    const DType* rhsoff = BinaryOp::use_rhs ?
+      (rhs + Selector<RhsTarget>::Call(src, eid, dst) * rhs_len): nullptr;
+    DType* outoff = out + eid * out_len;
+    while (tx < out_len) {
+      const Idx lhs_add = UseBcast ? lhs_off[tx] : tx;
+      const Idx rhs_add = UseBcast ? rhs_off[tx] : tx;
+      DType val = BinaryOp::Call(
+          lhsoff + lhs_add * reduce_size,
+          rhsoff + rhs_add * reduce_size,
+          reduce_size);
+      outoff[tx] = val;
+      tx += stride_x;
+    }
+    ty += stride_y;
+  }
+}
+
+/*!
  * \brief CUDA implementation of g-SDDMM on Coo format.
  * \param bcast Broadcast information.
  * \param coo The Coo matrix.
@@ -359,6 +410,72 @@ void SDDMMCsrHetero(
         lhs_off, rhs_off,
         lhs_len, rhs_len, len);
   });
+}
+
+/*!
+ * \brief CUDA implementation of g-SDDMM on heterograph using Csr format.
+ * \param bcast Broadcast information.
+ * \param csr The Csr matrix.
+ * \param lhs The left hand side operand feature.
+ * \param rhs The right hand size operand feature.
+ * \param out The result feature on edges.
+ * \param stream cudaStream id.
+ */
+template <typename Idx, typename DType, typename Op,
+          int LhsTarget = 0, int RhsTarget = 2>
+void SDDMMCsrHetero_mergedEtypes(
+    const BcastOff& bcast,
+    const std::vector<CSRMatrix>& vec_csr,
+    const std::vector<NDArray>& vec_lhs,
+    const std::vector<NDArray>& vec_rhs,
+    std::vector<NDArray> vec_out,
+    const std::vector<dgl_type_t>& lhs_eid,
+    const std::vector<dgl_type_t>& rhs_eid,
+    cudaStream_t strm_id) {
+
+  int num_etypes = vec_csr.size();
+
+  int64_t *lhs_off = nullptr, *rhs_off = nullptr;
+  int64_t len = bcast.out_len,
+          lhs_len = bcast.lhs_len,
+          rhs_len = bcast.rhs_len;
+  int64_t reduce_dim = bcast.reduce_size;
+
+  std::vector<Idx*> indptr(num_etypes, NULL);
+  std::vector<Idx*> indices(num_etypes, NULL);
+  std::vector<Idx*>  edge_map(num_etypes, NULL);
+  std::vector<DType*> lhs_data(num_etypes, NULL);
+  std::vector<DType*> rhs_data(num_etypes, NULL);
+  std::vector<DType*> out_data(num_etypes, NULL);
+
+  int64_t tot_E = 0;
+  for (dgl_type_t etype = 0; etype < num_etypes; ++etype) {
+    CSRMatrix csr = vec_csr[etype];
+    indptr[etype] = csr.indptr.Ptr<Idx>();
+    indices[etype] = csr.indices.Ptr<Idx>();
+    edge_map[etype] = csr.data.Ptr<Idx>();
+    tot_E += csr.indices->shape[0];
+    lhs_data[etype] = vec_lhs[lhs_eid[etype]].Ptr<DType>();
+    rhs_data[etype] = vec_rhs[rhs_eid[etype]].Ptr<DType>();
+    out_data[etype] = vec_out[etype].Ptr<DType>();
+ }
+  const int ntx = FindNumThreads(len);
+  const int nty = CUDA_MAX_NUM_THREADS / ntx;
+  const int nbx = (len + ntx - 1) / ntx;
+  const int nby = FindNumBlocks<'y'>((tot_E + nty - 1) / nty);
+  const dim3 nblks(nbx, nby);
+  const dim3 nthrs(ntx, nty);
+  const bool use_idx = !IsNullArray(vec_csr[0].data);
+  // std::cout << "use_idx " << use_idx << std::endl;
+  // BCAST_IDX_CTX_SWITCH(bcast, use_idx, out->ctx, lhs_off, rhs_off, {
+  //   CUDA_KERNEL_CALL((SDDMMCsrKernel_MergedEtypes<Idx, DType, Op, UseBcast, UseIdx, LhsTarget, RhsTarget>),
+  //       nblks, nthrs, 0, strm_id,
+  //       lhs_data, rhs_data, out_data,
+  //       indptr, indices, edge_map,
+  //       N, M, E, reduce_dim,
+  //       lhs_off, rhs_off,
+  //       lhs_len, rhs_len, len);
+  // });
 }
 
 
