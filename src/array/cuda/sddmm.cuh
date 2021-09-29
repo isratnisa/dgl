@@ -205,42 +205,44 @@ template <typename Idx, typename DType, typename BinaryOp,
           bool UseBcast = false, bool UseIdx = false,
           int LhsTarget = 0, int RhsTarget = 2>
 __global__ void SDDMMCsrKernel_MergedEtypes(
-  const DType* __restrict__ lhs,
-  const DType* __restrict__ rhs,
-  DType* __restrict__ out,
-  const Idx* __restrict__ indptr,
-  const Idx* __restrict__ indices,
-  const Idx* __restrict__ edge_map,
-  int64_t N, int64_t M, int64_t E, int64_t reduce_size,
+  const DType** __restrict__ lhs_ptrs,
+  const DType** __restrict__ rhs,
+  DType** __restrict__ out,
+  const Idx** __restrict__ indptr,
+  const Idx** __restrict__ indices,
+  const Idx** __restrict__ edge_map,
+  // int64_t N, int64_t M,
+  int64_t E, int64_t reduce_size,
   const int64_t* __restrict__ lhs_off,
   const int64_t* __restrict__ rhs_off,
   int64_t lhs_len, int64_t rhs_len, int64_t out_len) {
   // SDDMM with Csr.
   Idx ty = blockIdx.y * blockDim.y + threadIdx.y;
   const Idx stride_y = blockDim.y * gridDim.y;
-  while (ty < E) {
-    const Idx src = BinarySearchSrc<Idx>(indptr, N + 1, ty);
-    const Idx dst = _ldg(indices + ty);
-    const Idx eid = UseIdx ? _ldg(edge_map + ty) : ty;
-    int64_t tx = blockIdx.x * blockDim.x + threadIdx.x;
-    const int64_t stride_x = blockDim.x * gridDim.x;
-    const DType* lhsoff = BinaryOp::use_lhs ?
-      (lhs + Selector<LhsTarget>::Call(src, eid, dst) * lhs_len): nullptr;
-    const DType* rhsoff = BinaryOp::use_rhs ?
-      (rhs + Selector<RhsTarget>::Call(src, eid, dst) * rhs_len): nullptr;
-    DType* outoff = out + eid * out_len;
-    while (tx < out_len) {
-      const Idx lhs_add = UseBcast ? lhs_off[tx] : tx;
-      const Idx rhs_add = UseBcast ? rhs_off[tx] : tx;
-      DType val = BinaryOp::Call(
-          lhsoff + lhs_add * reduce_size,
-          rhsoff + rhs_add * reduce_size,
-          reduce_size);
-      outoff[tx] = val;
-      tx += stride_x;
-    }
-    ty += stride_y;
-  }
+   int64_t tx = blockIdx.x * blockDim.x + threadIdx.x;
+  // while (ty < E) {
+  //   const Idx src = BinarySearchSrc<Idx>(indptr, N + 1, ty);
+  //   const Idx dst = _ldg(indices + ty);
+  //   const Idx eid = UseIdx ? _ldg(edge_map + ty) : ty;
+  //   int64_t tx = blockIdx.x * blockDim.x + threadIdx.x;
+  //   const int64_t stride_x = blockDim.x * gridDim.x;
+  //   const DType* lhsoff = BinaryOp::use_lhs ?
+  //     (lhs + Selector<LhsTarget>::Call(src, eid, dst) * lhs_len): nullptr;
+  //   const DType* rhsoff = BinaryOp::use_rhs ?
+  //     (rhs + Selector<RhsTarget>::Call(src, eid, dst) * rhs_len): nullptr;
+  //   DType* outoff = out + eid * out_len;
+  //   while (tx < out_len) {
+  //     const Idx lhs_add = UseBcast ? lhs_off[tx] : tx;
+  //     const Idx rhs_add = UseBcast ? rhs_off[tx] : tx;
+  //     DType val = BinaryOp::Call(
+  //         lhsoff + lhs_add * reduce_size,
+  //         rhsoff + rhs_add * reduce_size,
+  //         reduce_size);
+  //     outoff[tx] = val;
+  //     tx += stride_x;
+  //   }
+  //   ty += stride_y;
+  // }
 }
 
 /*!
@@ -434,31 +436,49 @@ void SDDMMCsrHetero_mergedEtypes(
     cudaStream_t strm_id) {
 
   int num_etypes = vec_csr.size();
-
+  const DLContext ctx = vec_lhs[lhs_eid[0]]->ctx;
   int64_t *lhs_off = nullptr, *rhs_off = nullptr;
   int64_t len = bcast.out_len,
           lhs_len = bcast.lhs_len,
           rhs_len = bcast.rhs_len;
   int64_t reduce_dim = bcast.reduce_size;
 
-  std::vector<Idx*> indptr(num_etypes, NULL);
-  std::vector<Idx*> indices(num_etypes, NULL);
-  std::vector<Idx*>  edge_map(num_etypes, NULL);
-  std::vector<DType*> lhs_data(num_etypes, NULL);
-  std::vector<DType*> rhs_data(num_etypes, NULL);
-  std::vector<DType*> out_data(num_etypes, NULL);
+  // TODO (Israt): can't pass vector of pointers to cuda
+  Idx** indptr_ptrs = new Idx*[num_etypes];
+  Idx** indices_ptrs = new Idx*[num_etypes];
+  Idx**  emap_ptrs = new Idx*[num_etypes];
+  DType** lhs_ptrs = new DType*[num_etypes];
+  DType** rhs_ptrs  = new DType*[num_etypes];
+  DType** out_ptrs  = new DType*[num_etypes];
 
   int64_t tot_E = 0;
   for (dgl_type_t etype = 0; etype < num_etypes; ++etype) {
     CSRMatrix csr = vec_csr[etype];
-    indptr[etype] = csr.indptr.Ptr<Idx>();
-    indices[etype] = csr.indices.Ptr<Idx>();
-    edge_map[etype] = csr.data.Ptr<Idx>();
+    indptr_ptrs[etype] = csr.indptr.Ptr<Idx>();
+    indices_ptrs[etype] = csr.indices.Ptr<Idx>();
+    emap_ptrs[etype] = csr.data.Ptr<Idx>();
+    lhs_ptrs[etype] = vec_lhs[lhs_eid[etype]].Ptr<DType>();
+    rhs_ptrs[etype] = vec_rhs[rhs_eid[etype]].Ptr<DType>();
+    out_ptrs[etype] = vec_out[etype].Ptr<DType>();
     tot_E += csr.indices->shape[0];
-    lhs_data[etype] = vec_lhs[lhs_eid[etype]].Ptr<DType>();
-    rhs_data[etype] = vec_rhs[rhs_eid[etype]].Ptr<DType>();
-    out_data[etype] = vec_out[etype].Ptr<DType>();
- }
+  }
+  DType** d_lhs_ptrs, **d_rhs_ptrs, **d_out_ptrs;
+  Idx** d_indptr_ptrs, **d_indices_ptrs, **d_emap_ptrs;
+
+  CUDA_CALL(cudaMalloc(&d_lhs_ptrs, num_etypes * sizeof(DType*)));
+  CUDA_CALL(cudaMalloc(&d_rhs_ptrs, num_etypes * sizeof(DType*)));
+  CUDA_CALL(cudaMalloc(&d_out_ptrs, num_etypes * sizeof(DType*)));
+  CUDA_CALL(cudaMalloc(&d_indptr_ptrs, num_etypes * sizeof(Idx*)));
+  CUDA_CALL(cudaMalloc(&d_indices_ptrs, num_etypes * sizeof(Idx*)));
+  CUDA_CALL(cudaMalloc(&d_emap_ptrs, num_etypes * sizeof(Idx*)));
+
+  CUDA_CALL(cudaMemcpy(d_lhs_ptrs, lhs_ptrs, num_etypes * sizeof(DType*), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_rhs_ptrs, rhs_ptrs, num_etypes * sizeof(DType*), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_out_ptrs, out_ptrs, num_etypes * sizeof(DType*), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_indptr_ptrs, indptr_ptrs, num_etypes * sizeof(Idx*), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_indices_ptrs, indices_ptrs, num_etypes * sizeof(Idx*), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_emap_ptrs, emap_ptrs, num_etypes * sizeof(Idx*), cudaMemcpyHostToDevice));
+
   const int ntx = FindNumThreads(len);
   const int nty = CUDA_MAX_NUM_THREADS / ntx;
   const int nbx = (len + ntx - 1) / ntx;
@@ -466,16 +486,22 @@ void SDDMMCsrHetero_mergedEtypes(
   const dim3 nblks(nbx, nby);
   const dim3 nthrs(ntx, nty);
   const bool use_idx = !IsNullArray(vec_csr[0].data);
-  // std::cout << "use_idx " << use_idx << std::endl;
-  // BCAST_IDX_CTX_SWITCH(bcast, use_idx, out->ctx, lhs_off, rhs_off, {
-  //   CUDA_KERNEL_CALL((SDDMMCsrKernel_MergedEtypes<Idx, DType, Op, UseBcast, UseIdx, LhsTarget, RhsTarget>),
-  //       nblks, nthrs, 0, strm_id,
-  //       lhs_data, rhs_data, out_data,
-  //       indptr, indices, edge_map,
-  //       N, M, E, reduce_dim,
-  //       lhs_off, rhs_off,
-  //       lhs_len, rhs_len, len);
-  // });
+  BCAST_IDX_CTX_SWITCH(bcast, use_idx, vec_out[0]->ctx, lhs_off, rhs_off, {
+    CUDA_KERNEL_CALL((SDDMMCsrKernel_MergedEtypes<Idx, DType, Op, UseBcast, UseIdx,
+      LhsTarget, RhsTarget>),
+        nblks, nthrs, 0, strm_id,
+        (const DType**)d_lhs_ptrs,
+        (const DType**)d_rhs_ptrs, (DType**)d_out_ptrs,
+        (const Idx**)d_indptr_ptrs, (const Idx**) d_indices_ptrs,
+        (const Idx**)d_emap_ptrs, tot_E,
+        reduce_dim,
+        lhs_off, rhs_off,
+        lhs_len, rhs_len, len);
+  });
+  delete lhs_ptrs; delete rhs_ptrs; delete out_ptrs;
+  delete indptr_ptrs; delete indices_ptrs; delete emap_ptrs;
+  cudaFree(d_lhs_ptrs); cudaFree(d_rhs_ptrs); cudaFree(d_out_ptrs);
+  cudaFree(d_indptr_ptrs); cudaFree(d_indices_ptrs); cudaFree(d_emap_ptrs);
 }
 
 
