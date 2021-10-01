@@ -112,12 +112,12 @@ void SDDMMCsrHetero(const std::string& op,
   SWITCH_BITS(bits, DType, {
     SWITCH_OP(op, Op, {
       SWITCH_TARGET(lhs_target, rhs_target, LhsTarget, RhsTarget, {
-        /* Call SDDMM for all relation types */
+        /* Call one SDDMM CUDA kernel for all relation types */
         cuda::SDDMMCsrHetero_mergedEtypes<IdType, DType, Op, LhsTarget, RhsTarget>(
               bcast, vec_csr,
               vec_lhs, vec_rhs, vec_out,
               lhs_eid, rhs_eid, thr_entry->stream);
-        /* Call SDDMM for each relation type */
+        /* Call SDDMM CUDA kernel for each relation type sequentially */
         // for (dgl_type_t etype = 0; etype < lhs_eid.size(); ++etype) {
         //   CSRMatrix csr = vec_csr[etype];
         //   NDArray lhs = vec_lhs[lhs_eid[etype]];
