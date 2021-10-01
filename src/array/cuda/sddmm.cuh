@@ -501,7 +501,10 @@ void SDDMMCsrHetero_mergedEtypes(
   const int ntx = FindNumThreads(len);
   const int nty = CUDA_MAX_NUM_THREADS / ntx;
   const int nbx = (len + ntx - 1) / ntx;
+  // TODO(Israt): Using the same number of blocks to process all etypes is not ideal.
+  // Binning can be used to group etypes with similar load and launch each bin seperately.
   const int blk_load = 16; // number of blocks assigned per etype
+  // Assinging blk_load number of block to process each etype
   const int nby = FindNumBlocks<'y'>((num_etypes * blk_load));// + nty - 1) / nty);
   const dim3 nblks(nbx, nby);
   const dim3 nthrs(ntx, nty);
