@@ -12,6 +12,8 @@
 #include "atomic.cuh"
 #include "../../runtime/cuda/cuda_common.h"
 #include "./utils.h"
+#include <bits/stdc++.h>
+#include <omp.h>
 
 namespace dgl {
 
@@ -182,6 +184,232 @@ __global__ void SpMMCsrKernel(
   }
 }
 
+
+/*!
+ * \brief CUDA kernel of g-SpMM on Csr format.
+ * \note it uses node parallel strategy, different threadblocks (on y-axis)
+ *       is responsible for the computation on different destination nodes.
+ *       Threadblocks on the x-axis are responsible for the computation on
+ *       different positions in feature dimension.
+ */
+template <typename Idx, typename DType,
+          typename BinaryOp, typename ReduceOp,
+          bool UseBcast = false, bool UseIdx = false>
+__global__ void SpMMCsrKernel_bin(
+  const DType* __restrict__ ufeat,
+  const DType* __restrict__ efeat,
+  DType* __restrict__ out,
+  Idx* __restrict__ arg_u,
+  Idx* __restrict__ arg_e,
+  const Idx* __restrict__ indptr,
+  const Idx* __restrict__ indices,
+  const Idx* __restrict__ edge_map,
+  int64_t num_rows, int64_t num_cols,
+  const int64_t* __restrict__ ubcast_off,
+  const int64_t* __restrict__ ebcast_off,
+  int64_t ufeat_len, int64_t efeat_len, int64_t out_len,
+  const int *rowGroupPtr, const int numRowsPerGroup) {
+  // SPMM with CSR.
+  int ty = blockIdx.y * blockDim.y + threadIdx.y;
+  const Idx stride_y = blockDim.y * gridDim.y;
+  const int stride_x = blockDim.x * gridDim.x;
+  while (ty < numRowsPerGroup) {
+    ty = rowGroupPtr[ty];
+    int tx = blockIdx.x * blockDim.x + threadIdx.x;
+    while (tx < out_len) {
+      DType local_accum = ReduceOp::zero();
+      Idx local_argu = 0, local_arge = 0;
+      const int lhs_add = UseBcast ? ubcast_off[tx] : tx;
+      const int rhs_add = UseBcast ? ebcast_off[tx] : tx;
+      for (Idx i = indptr[ty]; i < indptr[ty + 1]; ++i) {
+        const Idx eid = UseIdx ? _ldg(edge_map + i) : i;
+        const Idx cid = _ldg(indices + i);
+        const DType* uoff = BinaryOp::use_lhs ? (ufeat + cid * ufeat_len): nullptr;
+        const DType* eoff = BinaryOp::use_rhs ? (efeat + eid * efeat_len): nullptr;
+        DType out = BinaryOp::Call(uoff + lhs_add, eoff + rhs_add);
+        ReduceOp::Call(&local_accum, &local_argu, &local_arge, out, cid, eid);
+      }
+      out[ty * out_len + tx] += local_accum;
+      if (ReduceOp::require_arg && BinaryOp::use_lhs)
+        arg_u[ty * out_len + tx] = local_argu;
+      if (ReduceOp::require_arg && BinaryOp::use_rhs)
+        arg_e[ty * out_len + tx] = local_arge;
+      tx += stride_x;
+    }
+    ty += stride_y;
+  }
+}
+
+
+// Binary search the row_offsets to find the source node of the edge id.
+template <typename Idx>
+__device__ __forceinline__ Idx BinarySearchSrc(const Idx *array, Idx length, Idx eid) {
+  Idx lo = 0, hi = length - 1;
+  while (lo < hi) {
+    Idx mid = (lo + hi) >> 1;
+    if (_ldg(array + mid) <= eid) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  // INVARIANT: lo == hi
+  if (_ldg(array + hi) == eid) {
+    return hi;
+  } else {
+    return hi - 1;
+  }
+}
+
+/*!
+ * \brief CUDA kernel of g-SpMM on Csr format.
+ * \note Pocess all relation types in the same kernel. Uses binning
+ * strategy to address inter-relation load_imbalance.
+ */
+template <typename Idx, typename DType,
+          typename BinaryOp, typename ReduceOp,
+          bool UseBcast = false, bool UseIdx = false>
+__global__ void SpMMCsrKernel_mergedEtypes_bin(
+  const DType** __restrict__ lhs_ptrs,
+  const DType** __restrict__ rhs_ptrs,
+  DType** __restrict__ out_ptrs,
+  Idx* __restrict__ arg_u,
+  Idx* __restrict__ arg_e,
+  const Idx** __restrict__ indptr_ptrs,
+  const Idx** __restrict__ indices_ptrs,
+  const Idx** __restrict__ emap_ptrs,
+  const int64_t* E_per_etype,
+  const int64_t* N_per_etype,
+  const int64_t* __restrict__ ubcast_off,
+  const int64_t* __restrict__ ebcast_off,
+  int64_t ufeat_len, int64_t efeat_len, int64_t out_len,
+  const int64_t* blk_load_etype) {
+  // SPMM with merged relationship on Csr.
+  int blk_load = 16;
+  const Idx stride_y = blockDim.y * blk_load;
+  const int etype = blockIdx.y / blk_load;
+  const Idx* indptr = indptr_ptrs[etype];
+  const Idx* indices = indices_ptrs[etype];
+  const Idx* edge_map = emap_ptrs[etype];
+  const DType* ufeat = lhs_ptrs[etype];
+  const DType* efeat = rhs_ptrs[etype];
+  DType* out = out_ptrs[etype];
+  const int64_t E = E_per_etype[etype];
+  const int64_t num_rows = N_per_etype[etype];
+
+  // int ty = blockIdx.y * blockDim.y + threadIdx.y;
+  Idx ty = (blockIdx.y % blk_load) * blockDim.y + threadIdx.y;
+  // const Idx stride_y = blockDim.y * gridDim.y;
+  const int stride_x = blockDim.x * gridDim.x;
+  while (ty < num_rows) {
+    if ((indptr[ty +1 ] - indptr[ty]) > 0) {
+      int tx = blockIdx.x * blockDim.x + threadIdx.x;
+      while (tx < out_len) {
+        DType local_accum = ReduceOp::zero();
+        Idx local_argu = 0, local_arge = 0;
+        const int lhs_add = UseBcast ? ubcast_off[tx] : tx;
+        const int rhs_add = UseBcast ? ebcast_off[tx] : tx;
+        // TODO (Israt): avoid accessing pointer for empty rows
+
+        for (Idx i = indptr[ty]; i < indptr[ty + 1]; ++i) {
+          const Idx eid = UseIdx ? _ldg(edge_map + i) : i;
+          const Idx cid = _ldg(indices + i);
+          const DType* uoff = BinaryOp::use_lhs ? (ufeat + cid * ufeat_len): nullptr;
+          const DType* eoff = BinaryOp::use_rhs ? (efeat + eid * efeat_len): nullptr;
+          DType out = BinaryOp::Call(uoff + lhs_add, eoff + rhs_add);
+          ReduceOp::Call(&local_accum, &local_argu, &local_arge, out, cid, eid);
+        }
+        out[ty * out_len + tx] += local_accum;
+        if (ReduceOp::require_arg && BinaryOp::use_lhs)
+          arg_u[ty * out_len + tx] = local_argu;
+        if (ReduceOp::require_arg && BinaryOp::use_rhs)
+          arg_e[ty * out_len + tx] = local_arge;
+        tx += stride_x;
+      }
+    }
+    ty += stride_y;
+  }
+}
+
+/*!
+ * \brief CUDA kernel of g-SpMM on Csr format.
+ * \note Pocess all relation types in the same kernel. Uses prefix-sum
+ * to estimate work load for each relation type. That's how it tries
+ * to address inter-relation load_imbalance.
+ */
+template <typename Idx, typename DType,
+          typename BinaryOp, typename ReduceOp,
+          bool UseBcast = false, bool UseIdx = false>
+__global__ void SpMMCsrKernel_mergedEtypes(
+  const DType** __restrict__ lhs_ptrs,
+  const DType** __restrict__ rhs_ptrs,
+  DType** __restrict__ out_ptrs,
+  Idx* __restrict__ arg_u,
+  Idx* __restrict__ arg_e,
+  const Idx** __restrict__ indptr_ptrs,
+  const Idx** __restrict__ indices_ptrs,
+  const Idx** __restrict__ emap_ptrs,
+  const int64_t* E_per_etype,
+  const int64_t* N_per_etype,
+  const int64_t* __restrict__ ubcast_off,
+  const int64_t* __restrict__ ebcast_off,
+  int64_t ufeat_len, int64_t efeat_len, int64_t out_len,
+  const int64_t* blk_load_etype, const int num_etypes) {
+  // SPMM with merged relationship on Csr.
+  // int blk_load = 16;
+
+  const int etype = BinarySearchSrc<int64_t>(blk_load_etype, num_etypes + 1, blockIdx.y);
+  const int blk_load_prefix = blk_load_etype[etype];
+  const int blk_load = blk_load_etype[ etype + 1] - blk_load_etype[ etype];
+
+  const Idx stride_y = blockDim.y * blk_load;
+  // const int etype = blockIdx.y / blk_load;
+  const Idx* indptr = indptr_ptrs[etype];
+  const Idx* indices = indices_ptrs[etype];
+  const Idx* edge_map = emap_ptrs[etype];
+  const DType* ufeat = lhs_ptrs[etype];
+  const DType* efeat = rhs_ptrs[etype];
+  DType* out = out_ptrs[etype];
+  const int64_t E = E_per_etype[etype];
+  const int64_t num_rows = N_per_etype[etype];
+
+  // // int ty = blockIdx.y * blockDim.y + threadIdx.y;
+  Idx ty = blockIdx.y  * blockDim.y + threadIdx.y;
+  if(etype)
+    ty = (blockIdx.y % blk_load_prefix) * blockDim.y + threadIdx.y;
+
+  // const Idx stride_y = blockDim.y * gridDim.y;
+  const int stride_x = blockDim.x * gridDim.x;
+  while (ty < num_rows) {
+    if ((indptr[ty + 1] - indptr[ty]) > 0) {
+      int tx = blockIdx.x * blockDim.x + threadIdx.x;
+      while (tx < out_len) {
+        DType local_accum = ReduceOp::zero();
+        Idx local_argu = 0, local_arge = 0;
+        const int lhs_add = UseBcast ? ubcast_off[tx] : tx;
+        const int rhs_add = UseBcast ? ebcast_off[tx] : tx;
+        for (Idx i = indptr[ty]; i < indptr[ty + 1]; ++i) {
+          const Idx eid = UseIdx ? _ldg(edge_map + i) : i;
+          const Idx cid = _ldg(indices + i);
+          const DType* uoff = BinaryOp::use_lhs ? (ufeat + cid * ufeat_len): nullptr;
+          const DType* eoff = BinaryOp::use_rhs ? (efeat + eid * efeat_len): nullptr;
+          DType out = BinaryOp::Call(uoff + lhs_add, eoff + rhs_add);
+          ReduceOp::Call(&local_accum, &local_argu, &local_arge, out, cid, eid);
+        }
+        // out[ty * out_len + tx] += local_accum;
+        atomicAdd(&out[ty * out_len + tx], local_accum);
+        // if (ReduceOp::require_arg && BinaryOp::use_lhs)
+        //   arg_u[ty * out_len + tx] = local_argu;
+        // if (ReduceOp::require_arg && BinaryOp::use_rhs)
+        //   arg_e[ty * out_len + tx] = local_arge;
+        tx += stride_x;
+      }
+    }
+    ty += stride_y;
+  }
+}
+
+
 /*!
  * \brief CUDA implementation of g-SpMM on Coo format.
  * \param bcast Broadcast information.
@@ -333,6 +561,7 @@ void SpMMCsr(
  * \param stream cudaStream id.
 
  */
+
 template <typename Idx, typename DType,
           typename BinaryOp, typename ReduceOp>
 void SpMMCsrHetero(
@@ -372,6 +601,297 @@ void SpMMCsrHetero(
         ubcast_off, ebcast_off,
         lhs_len, rhs_len, len)
   });
+}
+
+
+/* SpMM on CSR for using binning to address inter-row load_imbalance.
+ * Binning: Rows with similar degress are put in the same bins. Bins are
+ * processed sperately. Each bin uses a number of thread blocks proportional to its
+ * nodes' degree for better load balance. All the rows in the same bin uses same
+ * number of thread blocks.
+ */
+template <typename Idx, typename DType,
+          typename BinaryOp, typename ReduceOp>
+void SpMMCsrHetero_bin(
+    const BcastOff& bcast,
+    const CSRMatrix& csr,
+    NDArray ufeat, NDArray efeat,
+    NDArray out, NDArray argu, NDArray arge,
+    cudaStream_t strm_id) {
+  const Idx *indptr = csr.indptr.Ptr<Idx>();
+  const Idx *indices = csr.indices.Ptr<Idx>();
+  const Idx *edge_map = csr.data.Ptr<Idx>();
+  const DType *ufeat_data = ufeat.Ptr<DType>();
+  const DType *efeat_data = efeat.Ptr<DType>();
+  DType *out_data = out.Ptr<DType>();
+  Idx* argu_data = argu.Ptr<Idx>();
+  Idx* arge_data = arge.Ptr<Idx>();
+
+  int64_t *ubcast_off = nullptr, *ebcast_off = nullptr;
+  int64_t len = bcast.out_len,
+          lhs_len = bcast.lhs_len,
+          rhs_len = bcast.rhs_len;
+  const int ntx = 16; //FindNumThreads(len);
+  const int nty = 128/16; //CUDA_MAX_NUM_THREADS / ntx;
+  const int nbx = (len + ntx - 1) / ntx;
+  int work = std::max(csr.num_rows, csr.indices->shape[0]);
+  const int nby = FindNumBlocks<'y'>((csr.indices->shape[0] + nty - 1) / nty);
+  //LOG(INFO) << "nblks=(" << nbx << ", " << nby << ") nthrs=(" << ntx << ", " << nty << ")";
+  const dim3 nblks(nbx, nby);
+  const dim3 nthrs(ntx, nty);
+  const bool use_idx = !IsNullArray(csr.data);
+
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+
+  // binning
+  // Extract CSR group info on CPU
+  // cudaEventRecord(start);
+  const int nBin = 10;
+  int THREADLOAD = 2;
+  int dimRow = csr.num_rows;
+  int *count = (int*) malloc (nBin * sizeof(int));
+  int *host_rowGroupPtr = (int*) malloc(nBin * dimRow * sizeof(int));
+  int LB[nBin], UB[nBin];
+  for (int i = 0; i < nBin; i++)
+  {
+    count [i] = 0;
+    UB[i] = (1 << i) * THREADLOAD + 1;
+    LB[i] = UB[i] >> 1;
+  }
+  LB[0] = 0;
+  UB[nBin - 1] = 999999999; // dimCol + 1;
+  NDArray csr_indptr_cpu = csr.indptr.CopyTo(DLContext{kDLCPU, 0});
+  Idx* indptr_data = static_cast<Idx*>(csr_indptr_cpu->data);
+  CHECK_NOTNULL(indptr_data);
+
+  omp_set_num_threads(nBin);  // create as many CPU threads as there are # of bins
+  #pragma omp parallel
+  {
+  // for (int i = 0; i < nBin; ++i)
+  // {
+    unsigned int cpu_thread_id = omp_get_thread_num();
+    int i = cpu_thread_id;
+
+    for (int row = 0; row < dimRow; row++) {
+      int NNZ = (indptr_data[row + 1] - indptr_data[row]);
+      if(NNZ > 0) {
+        if (NNZ > LB[i] && NNZ < UB[i]) {
+          host_rowGroupPtr[i * dimRow + count[i]++] = row;
+          break;
+        }
+      }
+    }
+  // }
+  }
+  int *rowGroupPtr;
+  CUDA_CALL(cudaMalloc((void **)&rowGroupPtr, dimRow * sizeof(int)));
+
+  int sum = 0;
+  // cudaStream_t stream[nBin + 1];
+  for (int i = 0; i < nBin; i++) {
+    if (count[i] > 0) {
+      CUDA_CALL(cudaMemcpy(rowGroupPtr + sum, host_rowGroupPtr + (i * dimRow), count[i] * sizeof(int), cudaMemcpyHostToDevice));
+      sum += count[i];
+    }
+    // cudaStreamCreate(&(stream[i]));
+  }
+  // cudaEventRecord(stop);
+  // cudaEventSynchronize(stop);
+  // float milliseconds = 0;
+  // cudaEventElapsedTime(&milliseconds, start, stop);
+  // std::cout << "Preprocessing: " << csr.num_rows << " indices " << csr.indices->shape[0] << " SpMM kernel: " << milliseconds << " " << std::endl;
+
+
+  sum = 0;
+  // std::cout << std::endl;
+
+  // cudaEventRecord(start);
+  for (int bin = 0; bin < nBin; ++bin) {
+    if(count[bin] > 0) {
+      int work = pow(2, bin) * count[bin];
+      const int nby = FindNumBlocks<'y'>((work + nty - 1) / nty);
+      //LOG(INFO) << "nblks=(" << nbx << ", " << nby << ") nthrs=(" << ntx << ", " << nty << ")";
+      const dim3 nblks(nbx, nby);
+      const dim3 nthrs(ntx, nty);
+      // std::cout << "work load " << work << ", rows in bin:" << count[bin] <<
+      // " nbx " << nby <<  std::endl;
+
+      BCAST_IDX_CTX_SWITCH(bcast, use_idx, ufeat->ctx, ubcast_off, ebcast_off, {
+        CUDA_KERNEL_CALL((SpMMCsrKernel_bin<Idx, DType, BinaryOp, ReduceOp, UseBcast, UseIdx>),
+            nblks, nthrs, 0, strm_id,
+            ufeat_data, efeat_data, out_data, argu_data, arge_data,
+            indptr, indices, edge_map,
+            csr.num_rows, csr.num_cols,
+            ubcast_off, ebcast_off,
+            lhs_len, rhs_len, len, rowGroupPtr+sum, count[bin])
+      });
+      sum += count[bin];
+    }
+  }
+  CUDA_CALL(cudaFree(rowGroupPtr));
+
+  // cudaEventRecord(stop);
+  // cudaEventSynchronize(stop);
+  // milliseconds = 0;
+  // cudaEventElapsedTime(&milliseconds, start, stop);
+  // std::cout << csr.num_rows << " indices " << csr.indices->shape[0] << " SpMM kernel: " << milliseconds << " " << std::endl;
+
+}
+
+template <typename Idx, typename DType,
+          typename BinaryOp, typename ReduceOp>
+void SpMMCsrHetero_mergedEtypes(
+  const BcastOff& bcast,
+  const std::vector<CSRMatrix>& vec_csr,
+  const std::vector<NDArray>& vec_ufeat,
+  const std::vector<NDArray>& vec_efeat,
+  std::vector<NDArray> vec_out,
+  const std::vector<NDArray>& out_aux,
+  const std::vector<dgl_type_t>& ufeat_ntids,  // ufeat node type id
+  const std::vector<dgl_type_t>& out_ntids){
+
+  int num_etypes = vec_csr.size();
+
+  auto* thr_entry = runtime::CUDAThreadEntry::ThreadLocal();
+
+  std::vector<Idx*> indptr_ptrs(num_etypes, NULL);
+  std::vector<Idx*> indices_ptrs(num_etypes, NULL);
+  std::vector<Idx*> emap_ptrs(num_etypes, NULL);
+  std::vector<DType*> ufeat_ptrs(num_etypes, NULL);
+  std::vector<DType*> efeat_ptrs(num_etypes, NULL);
+  std::vector<DType*> out_ptrs(num_etypes, NULL);
+  std::vector<int64_t> N_per_etype(num_etypes, 0);
+  std::vector<int64_t> E_per_etype(num_etypes, 0);
+  std::vector<int64_t> blk_load_etype(num_etypes + 1, 0); // number of blocks assigned per etype
+  const int nbin = 15;
+  std::vector<int> limit(nbin, 0);
+  std::vector<int> bin(nbin * num_etypes);
+  std::vector<int> count(nbin, 0);
+  int THREADLOAD = 2;
+  for (int i = 1; i < nbin; ++i)
+  {
+    // limit[i] = (1 << i) * THREADLOAD + 1;
+    limit[i] =  1 << (i+5);
+
+    std::cout << "bin limit " << limit[i-1] << " " << limit[i] << " given load "
+    << (1 << (i)) << std::endl;
+  }
+  limit[nbin - 1] = 999999999; //std::INT_MAX
+  for (dgl_type_t etype = 0; etype < num_etypes; ++etype) {
+    CSRMatrix csr = vec_csr[etype];
+    indptr_ptrs[etype] = csr.indptr.Ptr<Idx>();
+    indices_ptrs[etype] = csr.indices.Ptr<Idx>();
+    emap_ptrs[etype] = csr.data.Ptr<Idx>();
+    ufeat_ptrs[etype] = vec_ufeat[ufeat_ntids[etype]].Ptr<DType>();
+    efeat_ptrs[etype] = vec_efeat[etype].Ptr<DType>();
+    out_ptrs[etype] = vec_out[out_ntids[etype]].Ptr<DType>();
+    E_per_etype[etype] = csr.indices->shape[0];
+    N_per_etype[etype] = csr.num_rows;
+    // blk_load_etype[etype] = 16;
+
+    // blk_load_etype[etype + 1] = blk_load_etype[etype] + 16;
+    for (int i = 0; i < nbin; ++i) {
+      int work =   csr.indices->shape[0]; //csr.indptr->shape[0]; //
+      if(work >= limit[i] && work < limit[i+1]) {
+        bin[i * num_etypes + count[i]++] = etype;
+        blk_load_etype[etype + 1] = blk_load_etype[etype] + (1 << (i)); // (i+1)*5 + 1;
+       std::cout << etype << ": " << " load: " << blk_load_etype[etype + 1] - blk_load_etype[etype]
+     << " bin " << i << " work " << work << std::endl;
+
+        break;
+      }
+    }
+  }
+  // for (dgl_type_t etype = 0; etype < num_etypes; ++etype) {
+  //   std::cout << etype << ": " << " load: " << blk_load_etype[etype + 1] - blk_load_etype[etype]
+  //    << " bin " << i << " work " <<vec_csr[etype].indices->shape[0] << std::endl;
+  // }
+  // for (dgl_type_t b = 0; b < nbin; ++b) {
+  //   std::cout << "bin " << b << std::endl;
+  //   for (int i = 0; i < num_etypes; ++i) {
+  //     std::cout << bin[b * num_etypes + i] << " ";
+  //   }
+  //   std::cout << std::endl;
+  // }
+
+  // TODO(Israt) : hardcoded for sum+generic kernel
+  Idx* argu_data = nullptr; //out_aux[0].Ptr<Idx>();
+  Idx* arge_data = nullptr; //out_aux[1].Ptr<Idx>();
+
+  int64_t *ubcast_off = nullptr, *ebcast_off = nullptr;
+  int64_t len = bcast.out_len,
+          lhs_len = bcast.lhs_len,
+          rhs_len = bcast.rhs_len;
+
+  DType** d_ufeat_ptrs, **d_efeat_ptrs, **d_out_ptrs;
+  Idx** d_indptr_ptrs, **d_indices_ptrs, **d_emap_ptrs;
+  int64_t *d_E_per_etype, *d_N_per_etype, *d_blk_load_etype, *d_bin;
+
+  // TODO (Israt) : change to use DGL memory pull
+  CUDA_CALL(cudaMalloc(&d_ufeat_ptrs, num_etypes * sizeof(DType*)));
+  CUDA_CALL(cudaMalloc(&d_efeat_ptrs, num_etypes * sizeof(DType*)));
+  CUDA_CALL(cudaMalloc(&d_out_ptrs, num_etypes * sizeof(DType*)));
+  CUDA_CALL(cudaMalloc(&d_indptr_ptrs, num_etypes * sizeof(Idx*)));
+  CUDA_CALL(cudaMalloc(&d_indices_ptrs, num_etypes * sizeof(Idx*)));
+  CUDA_CALL(cudaMalloc(&d_emap_ptrs, num_etypes * sizeof(Idx*)));
+  CUDA_CALL(cudaMalloc(&d_E_per_etype, num_etypes * sizeof(int64_t)));
+  CUDA_CALL(cudaMalloc(&d_N_per_etype, num_etypes * sizeof(int64_t)));
+  CUDA_CALL(cudaMalloc(&d_blk_load_etype, (num_etypes + 1) * sizeof(int64_t)));
+
+  CUDA_CALL(cudaMemcpy(d_ufeat_ptrs, &(ufeat_ptrs[0]), num_etypes * sizeof(DType*), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_efeat_ptrs, &(efeat_ptrs[0]), num_etypes * sizeof(DType*), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_out_ptrs, &(out_ptrs[0]), num_etypes * sizeof(DType*), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_indptr_ptrs, &(indptr_ptrs[0]), num_etypes * sizeof(Idx*), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_indices_ptrs, &(indices_ptrs[0]), num_etypes * sizeof(Idx*), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_emap_ptrs, &(emap_ptrs[0]), num_etypes * sizeof(Idx*), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_E_per_etype, &E_per_etype[0], num_etypes * sizeof(int64_t), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_N_per_etype, &N_per_etype[0], num_etypes * sizeof(int64_t), cudaMemcpyHostToDevice));
+  CUDA_CALL(cudaMemcpy(d_blk_load_etype, &blk_load_etype[0], (num_etypes + 1) * sizeof(int64_t), cudaMemcpyHostToDevice));
+
+  const int ntx = 16;//FindNumThreads(len);
+  const int nty = 128; //ntx; //CUDA_MAX_NUM_THREADS / ntx;
+  const int nbx = (len + ntx - 1) / ntx;
+  // TODO(Israt): Using the same number of blocks to process all etypes is not ideal.
+  // Binning can be used to group etypes with similar load and launch each bin seperately.
+
+  // Assinging blk_load number of block to process each etype
+  // const int blk_load = 16;
+
+  const int nby = FindNumBlocks<'y'>(blk_load_etype[num_etypes]); // (num_etypes * blk_load);
+  // const int nby = FindNumBlocks<'y'>((csr.num_rows + nty - 1) / nty);
+  //LOG(INFO) << "nblks=(" << nbx << ", " << nby << ") nthrs=(" << ntx << ", " << nty << ")";
+    std::cout << "#blocks launched: " << blk_load_etype[num_etypes]
+  << " block: " << nbx << " " << nby
+  << " th " << ntx << " " << nty  << std::endl;
+  const dim3 nblks(nbx, nby);
+  const dim3 nthrs(ntx, nty);
+  const bool use_idx = !IsNullArray(vec_csr[0].data);
+
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+  cudaEventRecord(start);
+  BCAST_IDX_CTX_SWITCH(bcast, use_idx, vec_out[0]->ctx, ubcast_off, ebcast_off, {
+    CUDA_KERNEL_CALL((SpMMCsrKernel_mergedEtypes<Idx, DType, BinaryOp, ReduceOp, UseBcast, UseIdx>),
+        nblks, nthrs, 0, thr_entry->stream,
+        (const DType**)d_ufeat_ptrs, (const DType**)d_efeat_ptrs,
+        (DType**)d_out_ptrs, (Idx*)argu_data, (Idx*)arge_data,
+        (const Idx**)d_indptr_ptrs, (const Idx**) d_indices_ptrs,
+        (const Idx**)d_emap_ptrs, (const int64_t*)d_E_per_etype,
+        (const int64_t*)d_N_per_etype,
+        (const int64_t*)ubcast_off, (const int64_t*)ebcast_off,
+        lhs_len, rhs_len, len, (const int64_t*)d_blk_load_etype,
+        num_etypes);
+  });
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  float milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  std::cout << "SpMM kernel: " << milliseconds << " " << std::endl;
+  cudaFree(d_ufeat_ptrs); cudaFree(d_efeat_ptrs); cudaFree(d_out_ptrs);
+  cudaFree(d_indptr_ptrs); cudaFree(d_indices_ptrs); cudaFree(d_emap_ptrs);
 }
 
 
