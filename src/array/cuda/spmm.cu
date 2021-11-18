@@ -568,20 +568,6 @@ void SpMMCsrHetero(const std::string& op, const std::string& reduce,
     }
 
     auto* thr_entry = runtime::CUDAThreadEntry::ThreadLocal();
-
-    /* merged kernel for op == 'copy_rhs' */
-    //  hard coded for debugging purpose
-    // SWITCH_OP(op, Op, {
-    //   cuda::SpMMCsrHetero_mergedEtypes<IdType, DType, Op, cuda::reduce::Sum<IdType, DType> >(
-    //       bcast, vec_csr, vec_ufeat, vec_efeat, vec_out,
-    //       out_aux, ufeat_ntids, out_ntids);
-    // });
-
-    /* separate kernel */
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start);
     for (dgl_type_t etype = 0; etype < ufeat_ntids.size(); ++etype) {
       const dgl_type_t src_id = ufeat_ntids[etype];
       const dgl_type_t dst_id = out_ntids[etype];
@@ -620,9 +606,6 @@ void SpMMCsrHetero(const std::string& op, const std::string& reduce,
             cuda::SpMMCsrHetero<IdType, DType, Op, cuda::reduce::Sum<IdType, DType> >(
                 bcast, csr, ufeat, efeat, vec_out[dst_id],
                 NullArray(), NullArray(), thr_entry->stream);
-              // cuda::SpMMCsrHetero_bin<IdType, DType, Op, cuda::reduce::Sum<IdType, DType> >(
-              //     bcast, csr, ufeat, efeat, vec_out[dst_id],
-              //     NullArray(), NullArray(), thr_entry->stream);
           });
         }
       } else if (reduce == "max") {
@@ -665,11 +648,6 @@ void SpMMCsrHetero(const std::string& op, const std::string& reduce,
         device->FreeWorkspace(vec_csr[0].indptr->ctx, trans_out[ntype]);
       }
     }
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    float milliseconds = 0;
-    cudaEventElapsedTime(&milliseconds, start, stop);
-    std::cout << "SpMM separate kernel: " << milliseconds << " " << std::endl;
   });
 }
 
