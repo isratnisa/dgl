@@ -127,6 +127,93 @@ __global__ void ArgSpMMCooKernel(
  *       Threadblocks on the x-axis are responsible for the computation on
  *       different positions in feature dimension.
  */
+
+
+template <typename Idx, typename DType>
+__global__ void find_nonempty_rows(  const Idx* __restrict__ indptr,
+   int* non_empty, const int num_rows, int count) {
+    int idx = threadIdx.x;
+    int row = threadIdx.x;
+    int sum = 0;
+    for (int row = threadIdx.x; row < num_rows; row += blockDim.x) {
+      if ((indptr[row + 1] - indptr[row]) > 0) {
+        sum++;
+        non_empty[row] = true;
+      }
+    }
+    static const int blockSize = 1024;
+    __shared__ int r[blockSize];
+    r[idx] = sum;
+    __syncthreads();
+    for (int size = blockDim.x/2; size>0; size/=2) { //uniform
+        if (idx<size)
+            r[idx] += r[idx+size];
+        __syncthreads();
+    }
+    if (idx == 0) {
+      count = r[0];
+      // printf("GPU %d\n", count );
+    }
+}
+
+/*!
+ * \brief CUDA kernel of g-SpMM on Csr format.
+ * \note it uses node parallel strategy, different threadblocks (on y-axis)
+ *       is responsible for the computation on different destination nodes.
+ *       Threadblocks on the x-axis are responsible for the computation on
+ *       different positions in feature dimension.
+ */
+template <typename Idx, typename DType,
+          typename BinaryOp, typename ReduceOp,
+          bool UseBcast = false, bool UseIdx = false>
+__global__ void SpMMCsrKernel_Xdim(
+  const DType* __restrict__ ufeat,
+  const DType* __restrict__ efeat,
+  DType* __restrict__ out,
+  Idx* __restrict__ arg_u,
+  Idx* __restrict__ arg_e,
+  const Idx* __restrict__ indptr,
+  const Idx* __restrict__ indices,
+  const Idx* __restrict__ edge_map,
+  int64_t num_rows, int64_t num_cols,
+  const int64_t* __restrict__ ubcast_off,
+  const int64_t* __restrict__ ebcast_off,
+  int64_t ufeat_len, int64_t efeat_len, int64_t out_len,
+  const int* __restrict__ row_list, int64_t count) {
+
+  // SPMM with CSR.
+  unsigned int tId = threadIdx.x;
+  unsigned int laneId = tId & 31;
+  unsigned int gId = (blockIdx.x * blockDim.x + threadIdx.x);
+  unsigned int warpId = gId >> 5; // gId >> 5
+  unsigned int row = warpId; // row_list[warpId];
+  // if( row < count) {
+  if( row < num_rows) {
+    for(unsigned int k = laneId; k < out_len; k += 32) {
+      DType local_accum = ReduceOp::zero();
+      Idx local_argu = 0, local_arge = 0;
+      const int lhs_add = UseBcast ? ubcast_off[k] : k;
+      const int rhs_add = UseBcast ? ebcast_off[k] : k;
+      for (Idx col = indptr[row]; col < indptr[row + 1]; ++col) {
+        const Idx eid = UseIdx ? _ldg(edge_map + col) : col;
+        const Idx cid = _ldg(indices + col);
+        const DType* uoff = BinaryOp::use_lhs ? (ufeat + cid * ufeat_len): nullptr;
+        const DType* eoff = BinaryOp::use_rhs ? (efeat + eid * efeat_len): nullptr;
+        DType out = BinaryOp::Call(uoff + lhs_add, eoff + rhs_add);
+        ReduceOp::Call(&local_accum, &local_argu, &local_arge, out, cid, eid);
+      }
+      out[row * out_len + k] += local_accum;
+    }
+  }
+}
+
+/*!
+ * \brief CUDA kernel of g-SpMM on Csr format.
+ * \note it uses node parallel strategy, different threadblocks (on y-axis)
+ *       is responsible for the computation on different destination nodes.
+ *       Threadblocks on the x-axis are responsible for the computation on
+ *       different positions in feature dimension.
+ */
 template <typename Idx, typename DType,
           typename BinaryOp, typename ReduceOp,
           bool UseBcast = false, bool UseIdx = false>
@@ -183,7 +270,6 @@ __global__ void SpMMCsrKernel(
     ty += stride_y;
   }
 }
-
 
 /*!
  * \brief CUDA kernel of g-SpMM on Csr format.
@@ -331,6 +417,7 @@ __global__ void SpMMCsrKernel_mergedEtypes_bin(
   }
 }
 
+
 /*!
  * \brief CUDA kernel of g-SpMM on Csr format.
  * \note Pocess all relation types in the same kernel. Uses prefix-sum
@@ -356,14 +443,16 @@ __global__ void SpMMCsrKernel_mergedEtypes(
   int64_t ufeat_len, int64_t efeat_len, int64_t out_len,
   const int64_t* blk_load_etype, const int num_etypes) {
   // SPMM with merged relationship on Csr.
-  // int blk_load = 16;
+  int blk_load = 4;
 
-  const int etype = BinarySearchSrc<int64_t>(blk_load_etype, num_etypes + 1, blockIdx.y);
-  const int blk_load_prefix = blk_load_etype[etype];
-  const int blk_load = blk_load_etype[ etype + 1] - blk_load_etype[ etype];
+  // const int etype = BinarySearchSrc<int64_t>(blk_load_etype, num_etypes + 1, blockIdx.y);
+  const int etype = blockIdx.y / blk_load;
+  const int blk_load_prefix = blk_load * etype;//
+  // const int blk_load_prefix = blk_load_etype[etype];
+  // const int blk_load = blk_load_etype[ etype + 1] - blk_load_etype[ etype];
 
   const Idx stride_y = blockDim.y * blk_load;
-  // const int etype = blockIdx.y / blk_load;
+
   const Idx* indptr = indptr_ptrs[etype];
   const Idx* indices = indices_ptrs[etype];
   const Idx* edge_map = emap_ptrs[etype];
@@ -488,6 +577,7 @@ void SpMMCoo(
   });
 }
 
+
 /*!
  * \brief CUDA implementation of g-SpMM on Csr format.
  * \param bcast Broadcast information.
@@ -544,6 +634,112 @@ void SpMMCsr(
   });
 }
 
+
+/* SpMM on CSR for using binning to address inter-row load_imbalance.
+ * Binning: Rows with similar degress are put in the same bins. Bins are
+ * processed sperately. Each bin uses a number of thread blocks proportional to its
+ * nodes' degree for better load balance. All the rows in the same bin uses same
+ * number of thread blocks.
+ */
+float tot_mili_oneDim = 0;
+template <typename Idx, typename DType,
+          typename BinaryOp, typename ReduceOp>
+void SpMMCsr_oneDim(
+    const BcastOff& bcast,
+    const CSRMatrix& csr,
+    NDArray ufeat, NDArray efeat,
+    NDArray out, NDArray argu, NDArray arge,
+    cudaStream_t strm_id) {
+    const Idx *indptr = csr.indptr.Ptr<Idx>();
+    const Idx *indices = csr.indices.Ptr<Idx>();
+    const Idx *edge_map = csr.data.Ptr<Idx>();
+    const DType *ufeat_data = ufeat.Ptr<DType>();
+    const DType *efeat_data = efeat.Ptr<DType>();
+    DType *out_data = out.Ptr<DType>();
+    Idx* argu_data = argu.Ptr<Idx>();
+    Idx* arge_data = arge.Ptr<Idx>();
+
+    auto* thr_entry = runtime::CUDAThreadEntry::ThreadLocal();
+
+    int64_t *ubcast_off = nullptr, *ebcast_off = nullptr;
+    int64_t len = bcast.out_len,
+            lhs_len = bcast.lhs_len,
+            rhs_len = bcast.rhs_len;
+
+   int count = 0;
+  int *d_nonempty_row;
+
+  /* helps with perf (58ms to 37 ms on AM dataseet) but high preprocessing */
+  /* Preprocessing for maintaing list of non empty rows */
+  /*
+  NDArray csr_indptr_cpu = csr.indptr.CopyTo(DLContext{kDLCPU, 0});
+  Idx* indptr_data = static_cast<Idx*>(csr_indptr_cpu->data);
+  std::vector<int> nonempty_rows(csr.num_rows);
+
+  #pragma omp parallel for reduction (+:count)
+  for (int row = 0; row < (csr.indptr->shape[0] - 1); row++) {
+    if ((indptr_data[row + 1] - indptr_data[row]) > 0) //nonempty_flags[row]) //
+      nonempty_rows[count++] = row;
+  }
+
+  CUDA_CALL(cudaMalloc((void **)&d_nonempty_row, csr.num_rows * sizeof(int)));
+  CUDA_CALL(cudaMemcpy(d_nonempty_row, nonempty_rows.data(), count * sizeof(int), cudaMemcpyHostToDevice));
+  */
+  /* Preprocessing ends */
+
+  /* Preprocessing in CUDA (?) */
+  /*std::vector<bool> nonempty_flags(csr.num_rows);
+  bool* nonempty_flags = (bool*) malloc (csr.num_rows * sizeof(bool));
+  bool *d_nonempty_flag;
+  CUDA_CALL(cudaMalloc((bool **)&d_nonempty_flag, csr.num_rows * sizeof(bool)));
+  CUDA_CALL(cudaMemset(d_nonempty_flag, 0, csr.num_rows * sizeof(bool)));
+  CUDA_CALL(cudaMemcpy(d_nonempty_row, nonempty_rows.data(), count * sizeof(int), cudaMemcpyHostToDevice));
+
+  const int ntx = 1024;//128;
+  int nbx = 1; //((csr.num_rows + ntx - 1) / ntx);// ((csr.num_rows + ntx - 1) / ntx);
+   dim3 nblks(nbx);
+   dim3 nthrs(ntx);
+  CUDA_KERNEL_CALL((find_nonempty_rows<Idx, DType>),
+      nblks, nthrs, 0, thr_entry->stream,
+      indptr, d_nonempty_flag, csr.num_rows, count);
+
+  std::cout << count << " count\n";
+  CUDA_CALL(cudaMemcpy(nonempty_flags, d_nonempty_flag, csr.num_rows * sizeof(bool), cudaMemcpyDeviceToHost));
+  cudaDeviceSynchronize(); */
+
+  const int ntx = 128;
+  const int nbx =  ((csr.num_rows + ntx - 1) / ntx); //((count + ntx - 1) / ntx);
+  const dim3 nblks1(nbx);
+  const dim3 nthrs1(ntx);
+
+  const bool use_idx = !IsNullArray(csr.data);
+  cudaEvent_t start, stop;
+  cudaEventCreate(&start);
+  cudaEventCreate(&stop);
+  cudaEventRecord(start);
+  BCAST_IDX_CTX_SWITCH(bcast, use_idx, ufeat->ctx, ubcast_off, ebcast_off, {
+    CUDA_KERNEL_CALL((SpMMCsrKernel_Xdim<Idx, DType, BinaryOp, ReduceOp, UseBcast, UseIdx>),
+        nblks1, nthrs1, 0, thr_entry->stream,
+        ufeat_data, efeat_data, out_data, argu_data, arge_data,
+        indptr, indices, edge_map,
+        csr.num_rows, csr.num_cols,
+        ubcast_off, ebcast_off,
+        lhs_len, rhs_len, len,
+        d_nonempty_row, count);
+  });
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  float milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  tot_mili_oneDim += milliseconds;
+  // std::cout << "SpMM indiv kernel: " << milliseconds << " " <<tot_mili_oneDim << " " << std::endl;
+
+  // CUDA_CALL(cudaFree(d_nonempty_row));
+  // CUDA_CALL(cudaFree(d_nonempty_flag));
+
+}
+
+float tot_mili =0;
 /* SpMM on CSR for using binning to address inter-row load_imbalance.
  * Binning: Rows with similar degress are put in the same bins. Bins are
  * processed sperately. Each bin uses a number of thread blocks proportional to its
@@ -552,7 +748,7 @@ void SpMMCsr(
  */
 template <typename Idx, typename DType,
           typename BinaryOp, typename ReduceOp>
-void SpMMCsrHetero_bin(
+void SpMMCsr_bin(
     const BcastOff& bcast,
     const CSRMatrix& csr,
     NDArray ufeat, NDArray efeat,
@@ -584,7 +780,9 @@ void SpMMCsrHetero_bin(
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
-
+  cudaEvent_t start1, stop1;
+  cudaEventCreate(&start1);
+  cudaEventCreate(&stop1);
   // binning
   // Extract CSR group info on CPU
   // cudaEventRecord(start);
@@ -594,48 +792,49 @@ void SpMMCsrHetero_bin(
   int *count = (int*) malloc (nBin * sizeof(int));
   int *host_rowGroupPtr = (int*) malloc(nBin * dimRow * sizeof(int));
   int LB[nBin], UB[nBin];
-  for (int i = 0; i < nBin; i++)
-  {
+  for (int i = 0; i < nBin; i++) {
     count [i] = 0;
-    UB[i] = (1 << i) * THREADLOAD + 1;
+    UB[i] = (1 << (i+5)) * THREADLOAD + 1;
     LB[i] = UB[i] >> 1;
+    // std::cout << LB[i] << " - " << UB[i] << std::endl;
   }
   LB[0] = 0;
   UB[nBin - 1] = 999999999; // dimCol + 1;
+
   NDArray csr_indptr_cpu = csr.indptr.CopyTo(DLContext{kDLCPU, 0});
   Idx* indptr_data = static_cast<Idx*>(csr_indptr_cpu->data);
   CHECK_NOTNULL(indptr_data);
 
   omp_set_num_threads(nBin);  // create as many CPU threads as there are # of bins
-  #pragma omp parallel
+  // #pragma omp parallel
   {
-  // for (int i = 0; i < nBin; ++i)
-  // {
-    unsigned int cpu_thread_id = omp_get_thread_num();
-    int i = cpu_thread_id;
-
+    // unsigned int cpu_thread_id = omp_get_thread_num();
+    // int i = cpu_thread_id;
+    for (int i = 0; i < nBin; ++i)
+    {
     for (int row = 0; row < dimRow; row++) {
       int NNZ = (indptr_data[row + 1] - indptr_data[row]);
       if(NNZ > 0) {
         if (NNZ > LB[i] && NNZ < UB[i]) {
+          // if (csr.num_rows == 1046 && csr.indices->shape[0] == 566273) {
+          //   std::cout << "bin " << i << " row " << row << " nnz " << NNZ << std::endl;
+          // }
           host_rowGroupPtr[i * dimRow + count[i]++] = row;
-          break;
+          // break;
         }
       }
     }
-  // }
+    }
   }
   int *rowGroupPtr;
   CUDA_CALL(cudaMalloc((void **)&rowGroupPtr, dimRow * sizeof(int)));
 
   int sum = 0;
-  // cudaStream_t stream[nBin + 1];
   for (int i = 0; i < nBin; i++) {
     if (count[i] > 0) {
       CUDA_CALL(cudaMemcpy(rowGroupPtr + sum, host_rowGroupPtr + (i * dimRow), count[i] * sizeof(int), cudaMemcpyHostToDevice));
       sum += count[i];
     }
-    // cudaStreamCreate(&(stream[i]));
   }
   // cudaEventRecord(stop);
   // cudaEventSynchronize(stop);
@@ -647,17 +846,16 @@ void SpMMCsrHetero_bin(
   sum = 0;
   // std::cout << std::endl;
 
-  // cudaEventRecord(start);
+  cudaEventRecord(start);
   for (int bin = 0; bin < nBin; ++bin) {
     if(count[bin] > 0) {
-      int work = pow(2, bin) * count[bin];
+      int work =  pow(2, (bin+5)) * count[bin];
       const int nby = FindNumBlocks<'y'>((work + nty - 1) / nty);
-      //LOG(INFO) << "nblks=(" << nbx << ", " << nby << ") nthrs=(" << ntx << ", " << nty << ")";
       const dim3 nblks(nbx, nby);
       const dim3 nthrs(ntx, nty);
-      // std::cout << "work load " << work << ", rows in bin:" << count[bin] <<
-      // " nbx " << nby <<  std::endl;
-
+      // std::cout << bin << " #blocks " << pow(2, bin) << ", #rows in bin: " << count[bin] <<
+      // " nby " << nby << " nty " << nty << std::endl;
+    if (csr.num_rows == 1046 && csr.indices->shape[0] == 566273) {
       BCAST_IDX_CTX_SWITCH(bcast, use_idx, ufeat->ctx, ubcast_off, ebcast_off, {
         CUDA_KERNEL_CALL((SpMMCsrKernel_bin<Idx, DType, BinaryOp, ReduceOp, UseBcast, UseIdx>),
             nblks, nthrs, 0, strm_id,
@@ -667,17 +865,20 @@ void SpMMCsrHetero_bin(
             ubcast_off, ebcast_off,
             lhs_len, rhs_len, len, rowGroupPtr+sum, count[bin])
       });
+    }
       sum += count[bin];
     }
   }
   CUDA_CALL(cudaFree(rowGroupPtr));
 
-  // cudaEventRecord(stop);
-  // cudaEventSynchronize(stop);
-  // milliseconds = 0;
-  // cudaEventElapsedTime(&milliseconds, start, stop);
-  // std::cout << csr.num_rows << " indices " << csr.indices->shape[0] << " SpMM kernel: " << milliseconds << " " << std::endl;
-
+  cudaEventRecord(stop);
+  cudaEventSynchronize(stop);
+  float milliseconds = 0;
+  cudaEventElapsedTime(&milliseconds, start, stop);
+  tot_mili += milliseconds;
+  if(milliseconds > 1.0)
+    std::cout << csr.num_rows << " indices " << csr.indices->shape[0] << " SpMM kernel: " << milliseconds << " total: "
+      << tot_mili << std::endl;
 }
 
 template <typename Idx, typename DType,
@@ -713,10 +914,10 @@ void SpMMCsrHetero_mergedEtypes(
   for (int i = 1; i < nbin; ++i)
   {
     // limit[i] = (1 << i) * THREADLOAD + 1;
-    limit[i] =  1 << (i+5);
+    limit[i] =  1 << (i+6);
 
-    std::cout << "bin limit " << limit[i-1] << " " << limit[i] << " given load "
-    << (1 << (i)) << std::endl;
+    // std::cout << "bin limit " << limit[i-1] << " " << limit[i] << " given load "
+    // << (1 << (i - 1)) << std::endl;
   }
   limit[nbin - 1] = 999999999; //std::INT_MAX
   for (dgl_type_t etype = 0; etype < num_etypes; ++etype) {
@@ -729,20 +930,19 @@ void SpMMCsrHetero_mergedEtypes(
     out_ptrs[etype] = vec_out[out_ntids[etype]].Ptr<DType>();
     E_per_etype[etype] = csr.indices->shape[0];
     N_per_etype[etype] = csr.num_rows;
-    // blk_load_etype[etype] = 16;
+    blk_load_etype[etype] = 16;
 
     // blk_load_etype[etype + 1] = blk_load_etype[etype] + 16;
-    for (int i = 0; i < nbin; ++i) {
-      int work =   csr.indices->shape[0]; //csr.indptr->shape[0]; //
-      if(work >= limit[i] && work < limit[i+1]) {
-        bin[i * num_etypes + count[i]++] = etype;
-        blk_load_etype[etype + 1] = blk_load_etype[etype] + (1 << (i)); // (i+1)*5 + 1;
-       std::cout << etype << ": " << " load: " << blk_load_etype[etype + 1] - blk_load_etype[etype]
-     << " bin " << i << " work " << work << std::endl;
-
-        break;
-      }
-    }
+    // for (int i = 0; i < nbin; ++i) {
+    //   int work = csr.num_rows; //csr.indices->shape[0];
+    //   if(work >= limit[i] && work < limit[i+1]) {
+    //     bin[i * num_etypes + count[i]++] = etype;
+    //     blk_load_etype[etype + 1] = blk_load_etype[etype] + (1 << (i-1)); // (i+1)*5 + 1;
+    //  //   std::cout << etype << ": " << " load: " << blk_load_etype[etype + 1] - blk_load_etype[etype]
+    //  // << " bin " << i << " work " << work << std::endl;
+    //     break;
+    //   }
+    // }
   }
   // for (dgl_type_t etype = 0; etype < num_etypes; ++etype) {
   //   std::cout << etype << ": " << " load: " << blk_load_etype[etype + 1] - blk_load_etype[etype]
@@ -791,20 +991,22 @@ void SpMMCsrHetero_mergedEtypes(
   CUDA_CALL(cudaMemcpy(d_blk_load_etype, &blk_load_etype[0], (num_etypes + 1) * sizeof(int64_t), cudaMemcpyHostToDevice));
 
   const int ntx = 16;//FindNumThreads(len);
-  const int nty = 128; //ntx; //CUDA_MAX_NUM_THREADS / ntx;
+  const int nty = 128/ntx; //CUDA_MAX_NUM_THREADS / ntx;
   const int nbx = (len + ntx - 1) / ntx;
   // TODO(Israt): Using the same number of blocks to process all etypes is not ideal.
   // Binning can be used to group etypes with similar load and launch each bin seperately.
 
   // Assinging blk_load number of block to process each etype
-  // const int blk_load = 16;
+  const int blk_load = 4;
 
-  const int nby = FindNumBlocks<'y'>(blk_load_etype[num_etypes]); // (num_etypes * blk_load);
-  // const int nby = FindNumBlocks<'y'>((csr.num_rows + nty - 1) / nty);
+  const int nby = FindNumBlocks<'y'>((num_etypes * blk_load));
+  // const int nby = (num_etypes * blk_load);
+  // const int nby = FindNumBlocks<'y'>((blk_load_etype[num_etypes]));
+  // // const int nby = FindNumBlocks<'y'>((csr.num_rows + nty - 1) / nty);
   //LOG(INFO) << "nblks=(" << nbx << ", " << nby << ") nthrs=(" << ntx << ", " << nty << ")";
-    std::cout << "#blocks launched: " << blk_load_etype[num_etypes]
-  << " block: " << nbx << " " << nby
-  << " th " << ntx << " " << nty  << std::endl;
+  //   std::cout << "#blocks required: " << (num_etypes * blk_load)
+  // << " block lunched: " << nbx << " " << nby
+  // << " th " << ntx << " " << nty  << std::endl;
   const dim3 nblks(nbx, nby);
   const dim3 nthrs(ntx, nty);
   const bool use_idx = !IsNullArray(vec_csr[0].data);
@@ -829,7 +1031,7 @@ void SpMMCsrHetero_mergedEtypes(
   cudaEventSynchronize(stop);
   float milliseconds = 0;
   cudaEventElapsedTime(&milliseconds, start, stop);
-  std::cout << "SpMM kernel: " << milliseconds << " " << std::endl;
+  // std::cout << "SpMM kernel: " << milliseconds << " " << std::endl;
   cudaFree(d_ufeat_ptrs); cudaFree(d_efeat_ptrs); cudaFree(d_out_ptrs);
   cudaFree(d_indptr_ptrs); cudaFree(d_indices_ptrs); cudaFree(d_emap_ptrs);
 }
