@@ -590,17 +590,6 @@ void SpMMCsrHetero(const std::string& op, const std::string& reduce,
     }
 
     auto* thr_entry = runtime::CUDAThreadEntry::ThreadLocal();
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start);
-    /* merged kernel for op == 'copy_rhs' */  //  hard coded for debugging purpose
-    // SWITCH_OP(op, Op, {
-    //   cuda::SpMMCsrHetero_mergedEtypes<IdType, DType, Op, cuda::reduce::Sum<IdType, DType> >(
-    //       bcast, vec_csr, vec_ufeat, vec_efeat, vec_out,
-    //       out_aux, ufeat_ntids, out_ntids);
-    // });
-    /* separate kernel */
     for (dgl_type_t etype = 0; etype < ufeat_ntids.size(); ++etype) {
       const dgl_type_t src_id = ufeat_ntids[etype];
       const dgl_type_t dst_id = out_ntids[etype];
@@ -636,14 +625,8 @@ void SpMMCsrHetero(const std::string& op, const std::string& reduce,
           NDArray efeat = (vec_efeat.size() == 0) ?
             NullArray() : vec_efeat[etype];
           SWITCH_OP(op, Op, {
-            // cuda::SpMMCsr<IdType, DType, Op, cuda::reduce::Sum<IdType, DType> >(
-            //     bcast, csr, ufeat, efeat, (*vec_out)[dst_id], NullArray(), NullArray());
-            // cuda::SpMMCsr_bin<IdType, DType, Op, cuda::reduce::Sum<IdType, DType> >(
-            //     bcast, csr, ufeat, efeat, vec_out[dst_id],
-            //     NullArray(), NullArray(), thr_entry->stream);
-            cuda::SpMMCsr_oneDim<IdType, DType, Op, cuda::reduce::Sum<IdType, DType> >(
-                bcast, csr, ufeat, efeat, (*vec_out)[dst_id],
-                NullArray(), NullArray(), thr_entry->stream);
+            cuda::SpMMCsr<IdType, DType, Op, cuda::reduce::Sum<IdType, DType> >(
+                bcast, csr, ufeat, efeat, (*vec_out)[dst_id], NullArray(), NullArray());
           });
         }
       } else if (reduce == "max") {
@@ -673,11 +656,6 @@ void SpMMCsrHetero(const std::string& op, const std::string& reduce,
       }
     }
 
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    float milliseconds = 0;
-    cudaEventElapsedTime(&milliseconds, start, stop);
-    std::cout << "SpMM kernel: " << milliseconds << " " << std::endl;
     if (use_legacy_cusparsemm) {
       // transpose output
       for (dgl_type_t ntype = 0; ntype < (*vec_out).size(); ++ntype) {
@@ -691,7 +669,6 @@ void SpMMCsrHetero(const std::string& op, const std::string& reduce,
     }
   });
 }
-
 
 /*!
  * \brief CUDA implementation of g-SpMM on Coo format.
@@ -791,7 +768,6 @@ template void SpMMCsrHetero<kDLGPU, int64_t, 64>(
     const std::vector<NDArray>& ufeat, const std::vector<NDArray>& efeat,
     std::vector<NDArray>* out, std::vector<std::vector<NDArray>>* out_aux,
     const std::vector<dgl_type_t>& ufeat_ntids, const std::vector<dgl_type_t>& out_ntids);
-
 
 template void SpMMCoo<kDLGPU, int32_t, 16>(
     const std::string& op, const std::string& reduce,
