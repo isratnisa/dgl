@@ -79,7 +79,7 @@ class RGCNLowMem(nn.Module):
         self.weight = nn.Parameter(weight)
 
     def forward(self, g, feat, etypes):
-        # g : DGLGraph
+        # g : DGL block
         # feat : (|V|, D)
         # etypes : (|E|,)
         # sort etypes
@@ -88,10 +88,9 @@ class RGCNLowMem(nn.Module):
         sorted_etypes, index = torch.sort(etypes)
         torch.cuda.synchronize()
         torch.cuda.nvtx.range_pop()
-
         torch.cuda.nvtx.range_push("edge-subgr&misc")
         g = dgl.edge_subgraph(g, index, relabel_nodes=False)
-        # Create a new etypes to be an integer list of number of edges.
+        Create a new etypes to be an integer list of number of edges.
         num_rels = self.weight.shape[0]
         pos = torch.searchsorted(sorted_etypes, torch.arange(num_rels, device=g.device))
         num = torch.tensor([len(etypes)], device=g.device)
@@ -99,8 +98,7 @@ class RGCNLowMem(nn.Module):
         torch.cuda.synchronize()
         torch.cuda.nvtx.range_pop()
         # message passing
-
-        g.ndata['h'] = feat
+        g.srcdata['h'] = feat
         torch.cuda.nvtx.range_push("low-mem-updt-all")
         g.update_all(functools.partial(self.message, etypes=etypes), fn.sum('m', 'h'))
         torch.cuda.synchronize()
@@ -271,9 +269,9 @@ def main(args):
 
     g = dgl.to_homogeneous(g).to(dev)
     node_ids = torch.arange(g.num_nodes()).to(dev)
-    etypes = g.edata[dgl.ETYPE].long().to(dev)
+    # etypes = g.edata[dgl.ETYPE].long().to(dev)
     target_idx = node_ids[g.ndata[dgl.NTYPE] == category_id]
-    feat = torch.randn(g.num_nodes(), in_feat).to(dev)
+    # feat = torch.randn(g.num_nodes(), in_feat).to(dev)
     weight = torch.randn(num_rels, in_feat, out_feat).to(dev)
     sampler = MultiLayerNeighborSampler([4])
     train_idx = torch.nonzero(train_mask, as_tuple=False).squeeze()
@@ -281,18 +279,20 @@ def main(args):
                               batch_size=100, shuffle=True)
     # **** low-mem ******
     conv = RGCNLowMem(weight).to(dev)
-    h = conv(g, feat, etypes)
 
     # dry run
-    for it, (input_nodes, output_nodes, blocks) in enumerate(train_loader):
-        print("processing block", blocks[0])
-        h = conv(blocks[0], feat, etypes)
+    for it, (input_nodes, output_nodes, block) in enumerate(train_loader):
+        feat = torch.randn(input_nodes.shape[0], in_feat).to(dev)
+        h = conv(block[0], feat, block[0].edata[dgl.ETYPE])
+        print()
 
     # test
-    # with Timer(dev) as t:
-    #     for i in range(iters):
-    #         h_lowmem = conv(g, feat, etypes)
-    # print("low-mem rgcn:", t.elapsed_secs / iters * 1000, "ms\n")
+    with Timer(dev) as t:
+        for i in range(iters):
+            for it, (input_nodes, output_nodes, block) in enumerate(train_loader):
+                feat = torch.randn(input_nodes.shape[0], in_feat).to(dev)
+                h_lowmem = conv(block[0], feat, block[0].edata[dgl.ETYPE])
+    print("low-mem rgcn:", t.elapsed_secs / iters * 1000, "ms\n")
 
     # # **** high-mem ******
     # conv = RGCNHighMem(weight).to(dev)
