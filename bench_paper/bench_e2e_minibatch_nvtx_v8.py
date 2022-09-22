@@ -54,12 +54,23 @@ class RGCNHighMem(nn.Module):
         # etypes : (|E|,)
         # g.ndata['h'] = feat
         g.srcdata['h'] = feat
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_push("hi-mem-updt-all")
         g.update_all(functools.partial(self.message, etypes=etypes), fn.sum('m', 'h'))
+        torch.cuda.nvtx.range_pop()
+        torch.cuda.synchronize()
         return g.ndata['h']
 
     def message(self, edges, etypes):
+        torch.cuda.nvtx.range_push("idx-select")
         weight = self.weight.index_select(0, etypes)
+        torch.cuda.nvtx.range_pop()
+
+        torch.cuda.nvtx.range_push("bmm")
         msg = {'m' : torch.bmm(edges.src['h'].unsqueeze(1), weight).squeeze(1)}
+        torch.cuda.nvtx.range_pop()
+
+        torch.cuda.synchronize()
         return msg
 
 class RGCNLowMem(nn.Module):
@@ -73,23 +84,36 @@ class RGCNLowMem(nn.Module):
         # feat : (|V|, D)
         # etypes : (|E|,)
         # sort etypes
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_push("th.sort")
         sorted_etypes, index = torch.sort(etypes)
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_pop()
+        torch.cuda.nvtx.range_push("edge-subgr&misc")
         g = dgl.edge_subgraph(g, index, relabel_nodes=False)
         # Create a new etypes to be an integer list of number of edges.
         num_rels = self.weight.shape[0]
         pos = torch.searchsorted(sorted_etypes, torch.arange(num_rels, device=g.device))
         num = torch.tensor([len(etypes)], device=g.device)
         etypes = (torch.cat([pos[1:], num]) - pos).tolist()
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_pop()
         # message passing
         g.srcdata['h'] = feat
+        torch.cuda.nvtx.range_push("low-mem-updt-all")
         g.update_all(functools.partial(self.message, etypes=etypes), fn.sum('m', 'h'))
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_pop()
         return g.ndata['h']
 
     def message(self, edges, etypes):
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_push("matmul")
         h_t = torch.split(edges.src['h'], etypes)
         msg = []
         for r in range(self.weight.shape[0]):
             msg.append(torch.matmul(h_t[r], self.weight[r]))
+        torch.cuda.nvtx.range_pop()
         return {'m' : torch.cat(msg)}
 
 class RGCNSegmentMM(nn.Module):
@@ -104,25 +128,36 @@ class RGCNSegmentMM(nn.Module):
         # etypes : (|E|,)
 
         # sort etypes
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_push("th.sort&edgesubgraph")
         etypes, index = torch.sort(etypes)
         g = dgl.edge_subgraph(g, index, relabel_nodes=False)
+        torch.cuda.nvtx.range_pop()
         # message passing
         g.srcdata['h'] = feat
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_push("update_all-segmm")
         g.update_all(functools.partial(self.message, etypes=etypes),
                      fn.sum('m', 'h'))
+        torch.cuda.nvtx.range_pop()
         return g.ndata['h']
 
     def message(self, edges, etypes):
         h = edges.src['h']
         w = self.weight.view(-1, self.weight.shape[2])
         num_rels = self.weight.shape[0]
+        torch.cuda.nvtx.range_push("comp-seg-len")
         out = torch.zeros((h.shape[0], self.weight.shape[2]), dtype=torch.float32, device=h.device)
         # dgl.sparse._gather_mm(h, w, out, E_per_rel, etypes, sortedE=True)
         pos_l = torch.searchsorted(etypes, torch.arange(num_rels, device=h.device))
         pos_r = torch.cat([pos_l[1:], torch.tensor([len(etypes)], device=h.device)])
         seglen = (pos_r - pos_l).cpu()  # XXX(minjie): cause device synchronize
+        torch.cuda.nvtx.range_pop()
 
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_push("segmm")
         m = segment_mm(h, self.weight, seglen_a=seglen)
+        torch.cuda.nvtx.range_pop()
         return {'m' : m}
 
 class RGCNGatherMM(nn.Module):
@@ -136,14 +171,23 @@ class RGCNGatherMM(nn.Module):
         # feat : (|V|, D)
         # etypes : (|E|,)
         g.srcdata['h'] = feat
+        torch.cuda.nvtx.range_push("update-all_gmm")
         g.update_all(functools.partial(self.message, etypes=etypes),
                      fn.sum('m', 'h'))
+        torch.cuda.nvtx.range_pop()
         return g.ndata['h']
 
     def message(self, edges, etypes):
         h = edges.src['h']
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_push("index-selct")
         w = self.weight.view(-1, self.weight.shape[2])
+        torch.cuda.nvtx.range_pop()
+
+        torch.cuda.synchronize()
+        torch.cuda.nvtx.range_push("gathermm")
         m = gather_mm(h, self.weight, idx_b=etypes)
+        torch.cuda.nvtx.range_pop()
         return {'m' : m}
 
 class RGCNHetero(nn.Module):
@@ -196,8 +240,6 @@ def main(args):
 
     iters = 20
     feat_scale = args.feat_scale
-    batch_size = args.batch_size
-    fanout = args.fanout
 
     in_feat = 16 * feat_scale
     out_feat = 16 * feat_scale
@@ -228,18 +270,19 @@ def main(args):
 
     g = dgl.to_homogeneous(g).to(dev)
     node_ids = torch.arange(g.num_nodes()).to(dev)
+    # etypes = g.edata[dgl.ETYPE].long().to(dev)
     target_idx = node_ids[g.ndata[dgl.NTYPE] == category_id]
+    # feat = torch.randn(g.num_nodes(), in_feat).to(dev)
     weight = torch.randn(num_rels, in_feat, out_feat).to(dev)
-    sampler = MultiLayerNeighborSampler([fanout])
+    sampler = MultiLayerNeighborSampler([4])
     train_idx = torch.nonzero(train_mask, as_tuple=False).squeeze()
     train_loader = DataLoader(g, target_idx[train_idx], sampler, device=device,
-                              batch_size=batch_size, shuffle=True)
+                              batch_size=100, shuffle=True)
     # **** low-mem ******
     conv = RGCNLowMem(weight).to(dev)
 
     # dry run
     for it, (input_nodes, output_nodes, block) in enumerate(train_loader):
-        print(block)
         feat = torch.randn(input_nodes.shape[0], in_feat).to(dev)
         h = conv(block[0], feat, block[0].edata[dgl.ETYPE])
         print()
@@ -330,10 +373,6 @@ if __name__ == '__main__':
             help="Weight for L2 loss")
     parser.add_argument("--feat_scale", type=int, default=1,
             help="feat scale")
-    parser.add_argument("--batch_size", type=int, default=100,
-            help="batch size")
-    parser.add_argument("--fanout", type=int, default=4,
-            help="fanout")
     args = parser.parse_args()
     print(args)
 
