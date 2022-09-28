@@ -239,10 +239,8 @@ def main(args):
         raise ValueError('Unknown dataset: {}'.format(args.dataset))
 
     iters = 20
-    feat_scale = args.feat_scale
-
-    in_feat = 16 * feat_scale
-    out_feat = 16 * feat_scale
+    in_feat = args.feat_len
+    out_feat = args.feat_len
 
     torch.cuda.set_device(dev)
 
@@ -252,7 +250,6 @@ def main(args):
     g = dgl.to_homogeneous(dataset[0]).to(dev)
     etypes = g.edata[dgl.ETYPE].long().to(dev)
     num_rels = len(dataset[0].etypes)
-    # E_per_rel = torch.histogram(etypes.float().cpu(), bins=num_rels).hist.long()
 
     print(f"""Dataset: {name}
     num_nodes: {g.num_nodes()}
@@ -300,7 +297,7 @@ def main(args):
     with Timer(dev) as t:
         for i in range(iters):
             h_gmm_sorted = conv(g, feat, etypes)
-    print("seg_mm rgcn:", t.elapsed_secs / iters * 1000, "ms")
+    print("seg_mm rgcn:", t.elapsed_secs / iters * 1000, "ms\n")
 
     # **** gather_mm unsorted ****
     conv = RGCNGatherMM(weight).to(dev)
@@ -331,24 +328,8 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='GCN')
     register_data_args(parser)
-    parser.add_argument("--impl", type=str, default="dgl",
-            help="use torch script or not")
-    parser.add_argument("--dropout", type=float, default=0.5,
-            help="dropout probability")
-    parser.add_argument("--gpu", type=int, default=-1,
-            help="gpu")
-    parser.add_argument("--lr", type=float, default=1e-2,
-            help="learning rate")
-    parser.add_argument("--n-epochs", type=int, default=200,
-            help="number of training epochs")
-    parser.add_argument("--n-hidden", type=int, default=16,
-            help="number of hidden gcn units")
-    parser.add_argument("--n-layers", type=int, default=1,
-            help="number of hidden gcn layers")
-    parser.add_argument("--weight-decay", type=float, default=5e-4,
-            help="Weight for L2 loss")
-    parser.add_argument("--feat_scale", type=int, default=1,
-            help="feat scale")
+    parser.add_argument("--feat_len", type=int, default=16,
+            help="feature length")
     args = parser.parse_args()
     print(args)
 
