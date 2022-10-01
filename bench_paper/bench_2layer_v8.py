@@ -25,7 +25,7 @@ class Timer:
         self.device = device
 
     def __enter__(self):
-        if self.device == 'cuda:0':
+        if str(self.device) == 'cuda:0':
             self.start_event = torch.cuda.Event(enable_timing=True)
             self.end_event = torch.cuda.Event(enable_timing=True)
             self.start_event.record()
@@ -34,7 +34,7 @@ class Timer:
         return self
 
     def __exit__(self, type, value, traceback):
-        if self.device == 'cuda:0':
+        if str(self.device) == 'cuda:0':
             self.end_event.record()
             torch.cuda.synchronize()  # Wait for the events to be recorded!
             self.elapsed_secs = self.start_event.elapsed_time(
@@ -275,7 +275,7 @@ if __name__ == '__main__':
     parser.add_argument("--conv", type=str, default="high", choices={'high', 'low', 'gather', 'seg'})
     parser.add_argument("--hdim", type=int, default=16)
     args = parser.parse_args()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f'Training with DGL built-in RGCN module.')
 
     # load and preprocess dataset
