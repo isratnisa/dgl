@@ -9,7 +9,6 @@ import dgl.function as fn
 from dgl.data.rdf import AIFBDataset, MUTAGDataset, BGSDataset, AMDataset
 from dgl.dataloading import MultiLayerNeighborSampler, DataLoader
 import torch.nn as nn
-import time
 import numpy as np
 import argparse, time, math
 from dgl.data import register_data_args
@@ -233,49 +232,71 @@ class RGCN(nn.Module):
             self.conv2 = RGCNGatherMMConv(h_dim, out_dim, num_rels)
 
     def forward(self, g):
-        x = self.emb.weight
-        h = F.relu(self.conv1(g, x, g.edata[dgl.ETYPE], g.edata['norm']))
-        h = self.conv2(g, h, g.edata[dgl.ETYPE], g.edata['norm'])
+        x = self.emb(g[0].srcdata[dgl.NID])
+        h = F.relu(self.conv1(g[0], x, g[0].edata[dgl.ETYPE], g[0].edata['norm']))
+        h = self.conv2(g[1], h, g[1].edata[dgl.ETYPE], g[1].edata['norm'])
         return h
 
-def evaluate(g, target_idx, labels, test_mask, model):
-    test_idx = torch.nonzero(test_mask, as_tuple=False).squeeze()
+def evaluate(model, labels, dataloader, inv_target):
     model.eval()
+    eval_logits = []
+    eval_seeds = []
     with torch.no_grad():
-        logits = model(g)
-    logits = logits[target_idx]
-    return accuracy(logits[test_idx].argmax(dim=1), labels[test_idx]).item()
+        for input_nodes, output_nodes, blocks in dataloader:
+            output_nodes = inv_target[output_nodes]
+            for block in blocks:
+                block.edata['norm'] = dgl.norm_by_dst(block).unsqueeze(1)
+            logits = model(blocks)
+            eval_logits.append(logits.cpu().detach())
+            eval_seeds.append(output_nodes.cpu().detach())
+    eval_logits = torch.cat(eval_logits)
+    eval_seeds = torch.cat(eval_seeds)
+    return accuracy(eval_logits.argmax(dim=1), labels[eval_seeds].cpu()).item()
 
-def train(args, g, target_idx, labels, train_mask, model):
-    # define train idx, loss function and optimizer
+def train(args, device, g, target_idx, labels, train_mask, model, inv_target):
     train_idx = torch.nonzero(train_mask, as_tuple=False).squeeze()
     loss_fcn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-2, weight_decay=5e-4)
-
-    model.train()
+    # construct sampler and dataloader
+    sampler = MultiLayerNeighborSampler(args.fanout)
+    train_loader = DataLoader(g, target_idx[train_idx], sampler, device=device,
+                                batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(g, target_idx[train_idx], sampler, device=device,
+                            batch_size=args.batch_size, shuffle=False)
+    
     ts = []
     for epoch in range(args.epoch):
-        with Timer(g.device) as t:
-            logits = model(g)
-            logits = logits[target_idx]
-            loss = loss_fcn(logits[train_idx], labels[train_idx])
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-        acc = accuracy(logits[train_idx].argmax(dim=1), labels[train_idx]).item()
-        print("Epoch {:05d} | Loss {:.4f} | Train Accuracy {:.4f} | Time {:.4f} ms"
-            .format(epoch, loss.item(), acc, t.elapsed_secs * 1000))
+        model.train()
+        total_loss = 0
+        with Timer(device) as t:
+            for it, (input_nodes, output_nodes, blocks) in enumerate(train_loader):
+                output_nodes = inv_target[output_nodes]
+                for block in blocks:
+                    block.edata['norm'] = dgl.norm_by_dst(block).unsqueeze(1)
+                logits = model(blocks)
+                loss = loss_fcn(logits, labels[output_nodes])
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                # total_loss += loss.item()
+        acc = evaluate(model, labels, val_loader, inv_target)
+        print("Epoch {:05d} | Val. Accuracy {:.4f} | Time {:.4f} ms "
+                .format(epoch, acc, t.elapsed_secs * 1000))
         if epoch >= 3:
             ts.append(t.elapsed_secs)
-    print("Average e2e 2-layers training time {:.4f} ms".format(np.mean(ts) * 1000))
+    print("Average e2e minibatch 2-layers training time {:.4f} ms".format(np.mean(ts) * 1000))
+
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='RGCN for entity classification')
+    parser = argparse.ArgumentParser(description='RGCN for entity classification (minibatch)')
     parser.add_argument("--dataset", type=str, default="aifb",
                         help="Dataset name ('aifb', 'mutag', 'bgs', 'am').")
     parser.add_argument("--conv", type=str, default="high", choices={'high', 'low', 'gather', 'seg'})
     parser.add_argument("--hdim", type=int, default=16)
+    parser.add_argument("--fanout", type=int, nargs=2, default=[16, 16])
+    parser.add_argument("--batch_size", type=int, default=100)
     parser.add_argument("--epoch", type=int, default=50)
+    parser.add_argument("--sample", type=str, default="cpu", choices=["cpu", "gpu"])
     args = parser.parse_args()
 
     # load and preprocess dataset
@@ -289,28 +310,38 @@ if __name__ == '__main__':
         data = AMDataset()
     else:
         raise ValueError('Unknown dataset: {}'.format(args.dataset))
+    
+    gpu_device = torch.device('cuda')
+    cpu_device = torch.device('cpu')
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Training with whole graph RGCN module.')
     g = data[0]
-    g = g.to(device)
     num_rels = len(g.canonical_etypes)
     category = data.predict_category
-    labels = g.nodes[category].data.pop('labels')
-    train_mask = g.nodes[category].data.pop('train_mask')
-    test_mask = g.nodes[category].data.pop('test_mask')
-    # calculate normalization weight for each edge, and find target category and node id
-    for cetype in g.canonical_etypes:
-        g.edges[cetype].data['norm'] = dgl.norm_by_dst(g, cetype).unsqueeze(1)
+    labels = g.nodes[category].data.pop('labels').to(gpu_device)
+    train_mask = g.nodes[category].data.pop('train_mask').to(cpu_device if args.sample == "cpu" else gpu_device)
+    test_mask = g.nodes[category].data.pop('test_mask').to(cpu_device if args.sample == "cpu" else gpu_device)
+
+    # find target category and node id
     category_id = g.ntypes.index(category)
-    g = dgl.to_homogeneous(g, edata=['norm'])
-    node_ids = torch.arange(g.num_nodes()).to(device)
+    g = dgl.to_homogeneous(g).to(cpu_device if args.sample == "cpu" else gpu_device)
+    node_ids = torch.arange(g.num_nodes()).to(cpu_device if args.sample == "cpu" else gpu_device)
     target_idx = node_ids[g.ndata[dgl.NTYPE] == category_id]
-    # create RGCN model    
-    in_size = g.num_nodes() 
+    g.ndata['ntype'] = g.ndata.pop(dgl.NTYPE)
+    g.ndata['type_id'] = g.ndata.pop(dgl.NID)
+
+    # find the mapping (inv_target) from global nodes IDs to type-specific node IDs
+    inv_target = torch.empty((g.num_nodes(),), dtype=torch.int64).to(gpu_device)
+    inv_target[target_idx] = torch.arange(0, target_idx.shape[0], dtype=inv_target.dtype).to(gpu_device)
+
+    # create RGCN model
+    in_size = g.num_nodes()
     out_size = data.num_classes
-    model = RGCN(in_size, args.hdim, out_size, num_rels, args.conv).to(device)
-    
-    train(args, g, target_idx, labels, train_mask, model)
-    acc = evaluate(g, target_idx, labels, test_mask, model)
+    model = RGCN(in_size, args.hdim, out_size, num_rels).to(gpu_device)
+    train(args, gpu_device, g, target_idx, labels, train_mask, model, inv_target)
+
+    test_idx = torch.nonzero(test_mask, as_tuple=False).squeeze()
+    test_sampler = MultiLayerNeighborSampler([-1, -1])
+    test_loader = DataLoader(g, target_idx[test_idx], test_sampler, device=gpu_device,
+                            batch_size=32, shuffle=False)
+    acc = evaluate(model, labels, test_loader, inv_target)
     print("Test accuracy {:.4f}".format(acc))
