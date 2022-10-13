@@ -209,27 +209,28 @@ class RGCNGatherMMConv(nn.Module):
 class RGCN(nn.Module):
     def __init__(self,
                 num_nodes,
+                in_dim,
                 h_dim,
                 out_dim,
                 num_rels,
-                conv="high"):
+                conv):
         super().__init__()
-        self.emb = nn.Embedding(num_nodes, h_dim)
+        self.emb = nn.Embedding(num_nodes, in_dim)
         if conv == 'high':
             print(f'Using high-mem Conv')
-            self.conv1 = RGCNHighMemConv(h_dim, h_dim, num_rels)
+            self.conv1 = RGCNHighMemConv(in_dim, h_dim, num_rels)
             self.conv2 = RGCNHighMemConv(h_dim, out_dim, num_rels)
         elif conv == 'low':
             print(f'Using low-mem Conv')
-            self.conv1 = RGCNLowMemConv(h_dim, h_dim, num_rels)
+            self.conv1 = RGCNLowMemConv(in_dim, h_dim, num_rels)
             self.conv2 = RGCNLowMemConv(h_dim, out_dim, num_rels)
         elif conv == 'seg':
             print(f'Using segment_mm Conv')
-            self.conv1 = RGCNSegmentMMConv(h_dim, h_dim, num_rels)
+            self.conv1 = RGCNSegmentMMConv(in_dim, h_dim, num_rels)
             self.conv2 = RGCNSegmentMMConv(h_dim, out_dim, num_rels)
         else:
             print(f'Using gather_mm Conv')
-            self.conv1 = RGCNGatherMMConv(h_dim, h_dim, num_rels)
+            self.conv1 = RGCNGatherMMConv(in_dim, h_dim, num_rels)
             self.conv2 = RGCNGatherMMConv(h_dim, out_dim, num_rels)
 
     def forward(self, g):
@@ -262,10 +263,9 @@ def train(args, g, target_idx, labels, train_mask, model):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-        acc = accuracy(logits[train_idx].argmax(dim=1), labels[train_idx]).item()
-        print("Epoch {:05d} | Loss {:.4f} | Train Accuracy {:.4f} | Time {:.4f} ms"
-            .format(epoch, loss.item(), acc, t.elapsed_secs * 1000))
-        if epoch >= 3:
+        print("Epoch {:05d} | Time {:.4f} ms"
+            .format(epoch, t.elapsed_secs * 1000))
+        if epoch >= 10:
             ts.append(t.elapsed_secs)
     print("Average e2e 2-layers training time {:.4f} ms".format(np.mean(ts) * 1000))
 
@@ -274,8 +274,9 @@ if __name__ == '__main__':
     parser.add_argument("--dataset", type=str, default="aifb",
                         help="Dataset name ('aifb', 'mutag', 'bgs', 'am').")
     parser.add_argument("--conv", type=str, default="high", choices={'high', 'low', 'gather', 'seg'})
+    parser.add_argument("--indim", type=int, default=16)
     parser.add_argument("--hdim", type=int, default=16)
-    parser.add_argument("--epoch", type=int, default=50)
+    parser.add_argument("--epoch", type=int, default=110)
     args = parser.parse_args()
 
     # load and preprocess dataset
@@ -307,10 +308,10 @@ if __name__ == '__main__':
     node_ids = torch.arange(g.num_nodes()).to(device)
     target_idx = node_ids[g.ndata[dgl.NTYPE] == category_id]
     # create RGCN model    
-    in_size = g.num_nodes() 
+    num_nodes = g.num_nodes()
     out_size = data.num_classes
-    model = RGCN(in_size, args.hdim, out_size, num_rels, args.conv).to(device)
+    model = RGCN(num_nodes, args.indim, args.hdim, out_size, num_rels, args.conv).to(device)
     
     train(args, g, target_idx, labels, train_mask, model)
-    acc = evaluate(g, target_idx, labels, test_mask, model)
-    print("Test accuracy {:.4f}".format(acc))
+    # acc = evaluate(g, target_idx, labels, test_mask, model)
+    # print("Test accuracy {:.4f}".format(acc))

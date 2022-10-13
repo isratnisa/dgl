@@ -208,27 +208,28 @@ class RGCNGatherMMConv(nn.Module):
 class RGCN(nn.Module):
     def __init__(self,
                 num_nodes,
+                in_dim,
                 h_dim,
                 out_dim,
                 num_rels,
                 conv="high"):
         super().__init__()
-        self.emb = nn.Embedding(num_nodes, h_dim)
+        self.emb = nn.Embedding(num_nodes, in_dim)
         if conv == 'high':
             print(f'Using high-mem Conv')
-            self.conv1 = RGCNHighMemConv(h_dim, h_dim, num_rels)
+            self.conv1 = RGCNHighMemConv(in_dim, h_dim, num_rels)
             self.conv2 = RGCNHighMemConv(h_dim, out_dim, num_rels)
         elif conv == 'low':
             print(f'Using low-mem Conv')
-            self.conv1 = RGCNLowMemConv(h_dim, h_dim, num_rels)
+            self.conv1 = RGCNLowMemConv(in_dim, h_dim, num_rels)
             self.conv2 = RGCNLowMemConv(h_dim, out_dim, num_rels)
         elif conv == 'seg':
             print(f'Using segment_mm Conv')
-            self.conv1 = RGCNSegmentMMConv(h_dim, h_dim, num_rels)
+            self.conv1 = RGCNSegmentMMConv(in_dim, h_dim, num_rels)
             self.conv2 = RGCNSegmentMMConv(h_dim, out_dim, num_rels)
         else:
             print(f'Using gather_mm Conv')
-            self.conv1 = RGCNGatherMMConv(h_dim, h_dim, num_rels)
+            self.conv1 = RGCNGatherMMConv(in_dim, h_dim, num_rels)
             self.conv2 = RGCNGatherMMConv(h_dim, out_dim, num_rels)
 
     def forward(self, g):
@@ -267,7 +268,8 @@ def train(args, device, g, target_idx, labels, train_mask, model, inv_target):
     ts = []
     for epoch in range(args.epoch):
         model.train()
-        total_loss = 0
+        # total_loss = 0
+        epoch_t = 0.0
         with Timer(device) as t:
             for it, (input_nodes, output_nodes, blocks) in enumerate(train_loader):
                 output_nodes = inv_target[output_nodes]
@@ -278,12 +280,13 @@ def train(args, device, g, target_idx, labels, train_mask, model, inv_target):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                # total_loss += loss.item()
-        acc = evaluate(model, labels, val_loader, inv_target)
-        print("Epoch {:05d} | Val. Accuracy {:.4f} | Time {:.4f} ms "
-                .format(epoch, acc, t.elapsed_secs * 1000))
-        if epoch >= 3:
-            ts.append(t.elapsed_secs)
+        epoch_t = t.elapsed_secs
+            # total_loss += loss.item()
+        # acc = evaluate(model, labels, val_loader, inv_target)
+        print("Epoch {:05d} | Time {:.4f} ms "
+                .format(epoch, epoch_t * 1000))
+        if epoch >= 10:
+            ts.append(epoch_t)
     print("Average e2e minibatch 2-layers training time {:.4f} ms".format(np.mean(ts) * 1000))
 
 
@@ -295,8 +298,9 @@ if __name__ == '__main__':
     parser.add_argument("--hdim", type=int, default=16)
     parser.add_argument("--fanout", type=int, nargs=2, default=[16, 16])
     parser.add_argument("--batch_size", type=int, default=100)
-    parser.add_argument("--epoch", type=int, default=50)
+    parser.add_argument("--epoch", type=int, default=110)
     parser.add_argument("--sample", type=str, default="cpu", choices=["cpu", "gpu"])
+    parser.add_argument("--indim", type=int, default=16)
     args = parser.parse_args()
 
     # load and preprocess dataset
@@ -334,14 +338,14 @@ if __name__ == '__main__':
     inv_target[target_idx] = torch.arange(0, target_idx.shape[0], dtype=inv_target.dtype).to(gpu_device)
 
     # create RGCN model
-    in_size = g.num_nodes()
+    num_nodes = g.num_nodes()
     out_size = data.num_classes
-    model = RGCN(in_size, args.hdim, out_size, num_rels).to(gpu_device)
+    model = RGCN(num_nodes, args.indim, args.hdim, out_size, num_rels, args.conv).to(gpu_device)
     train(args, gpu_device, g, target_idx, labels, train_mask, model, inv_target)
 
-    test_idx = torch.nonzero(test_mask, as_tuple=False).squeeze()
-    test_sampler = MultiLayerNeighborSampler([-1, -1])
-    test_loader = DataLoader(g, target_idx[test_idx], test_sampler, device=gpu_device,
-                            batch_size=32, shuffle=False)
-    acc = evaluate(model, labels, test_loader, inv_target)
-    print("Test accuracy {:.4f}".format(acc))
+    # test_idx = torch.nonzero(test_mask, as_tuple=False).squeeze()
+    # test_sampler = MultiLayerNeighborSampler([-1, -1])
+    # test_loader = DataLoader(g, target_idx[test_idx], test_sampler, device=gpu_device,
+    #                         batch_size=32, shuffle=False)
+    # acc = evaluate(model, labels, test_loader, inv_target)
+    # print("Test accuracy {:.4f}".format(acc))
