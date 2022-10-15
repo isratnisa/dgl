@@ -97,6 +97,8 @@ class RGCNLowMemConv(nn.Module):
         # feat : (|V|, D)
         # etypes : (|E|,)
         # sort etypes
+        if norm is not None:
+            g.edata['norm'] = norm
         sorted_etypes, index = torch.sort(etypes)
         g = dgl.edge_subgraph(g, index, relabel_nodes=False)
         # Create a new etypes to be an integer list of number of edges.
@@ -106,8 +108,6 @@ class RGCNLowMemConv(nn.Module):
         etypes = (torch.cat([pos[1:], num]) - pos).tolist()
         # message passing
         g.srcdata['h'] = feat
-        if norm is not None:
-            g.edata['norm'] = norm
         g.update_all(functools.partial(self.message, etypes=etypes), fn.sum('m', 'h'))
         return g.dstdata['h']
 
@@ -145,12 +145,12 @@ class RGCNSegmentMMConv(nn.Module):
         # norm (optional) : (|E|,)
 
         # sort etypes
+        if norm is not None:
+            g.edata['norm'] = norm
         etypes, index = torch.sort(etypes)
         g = dgl.edge_subgraph(g, index, relabel_nodes=False)
         # message passing
         g.srcdata['h'] = feat
-        if norm is not None:
-            g.edata['norm'] = norm
         g.update_all(functools.partial(self.message, etypes=etypes),
                      fn.sum('m', 'h'))
         return g.dstdata['h']
