@@ -211,10 +211,12 @@ class RGCN(nn.Module):
                 in_dim,
                 h_dim,
                 out_dim,
+                device,
                 num_rels,
                 conv="high"):
         super().__init__()
-        self.emb = nn.Embedding(num_nodes, in_dim)
+        # self.emb = nn.Embedding(num_nodes, in_dim)
+        self.emb = torch.randn(num_nodes, in_dim).to(device)
         if conv == 'high':
             print(f'Using high-mem Conv')
             self.conv1 = RGCNHighMemConv(in_dim, h_dim, num_rels)
@@ -233,7 +235,7 @@ class RGCN(nn.Module):
             self.conv2 = RGCNGatherMMConv(h_dim, out_dim, num_rels)
 
     def forward(self, g):
-        x = self.emb(g[0].srcdata[dgl.NID])
+        x = self.emb[g[0].srcdata[dgl.NID]]
         h = F.relu(self.conv1(g[0], x, g[0].edata[dgl.ETYPE], g[0].edata['norm']))
         h = self.conv2(g[1], h, g[1].edata[dgl.ETYPE], g[1].edata['norm'])
         return h
@@ -265,29 +267,37 @@ def train(args, device, g, target_idx, labels, train_mask, model, inv_target):
     val_loader = DataLoader(g, target_idx[train_idx], sampler, device=device,
                             batch_size=args.batch_size, shuffle=False)
     
-    ts = []
+    ts, fs, bs = [], [], [] 
     for epoch in range(args.epoch):
         model.train()
         # total_loss = 0
-        epoch_t = 0.0
-        with Timer(device) as t:
+        epoch_t, forward_t, backward_t = 0.0, 0.0, 0.0
+        with Timer(device) as t1:
             for it, (input_nodes, output_nodes, blocks) in enumerate(train_loader):
                 output_nodes = inv_target[output_nodes]
                 for block in blocks:
                     block.edata['norm'] = dgl.norm_by_dst(block).unsqueeze(1)
-                logits = model(blocks)
-                loss = loss_fcn(logits, labels[output_nodes])
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-        epoch_t = t.elapsed_secs
+                with Timer(device) as t2:
+                    logits = model(blocks)
+                    loss = loss_fcn(logits, labels[output_nodes])
+                with Timer(device) as t3:
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                forward_t += t2.elapsed_secs
+                backward_t += t3.elapsed_secs
+        epoch_t += t1.elapsed_secs
+                
             # total_loss += loss.item()
         # acc = evaluate(model, labels, val_loader, inv_target)
-        print("Epoch {:05d} | Time {:.4f} ms "
-                .format(epoch, epoch_t * 1000))
-        if epoch >= 10:
-            ts.append(epoch_t)
-    print("Average e2e minibatch 2-layers training time {:.4f} ms".format(np.mean(ts) * 1000))
+        print("Epoch {:05d} | Time {:.4f} ms | Forward Time {:.4f} ms | Backward Time {:.4f} "
+                .format(epoch, epoch_t*1000, forward_t*1000, backward_t*1000))
+    #     if epoch >= 10:
+    #         ts.append(t1.elapsed_secs - forward_t - backward_t)
+    #         fs.append(forward_t)
+    #         bs.append(backward_t)
+    # print("Average e2e minibatch 2-layers training times {:.4f} {:.4f} {:.4f} ms"
+    #         .format(np.mean(ts)*1000, np.mean(fs)*1000, np.mean(bs)*1000))
 
 
 if __name__ == '__main__':
@@ -297,7 +307,7 @@ if __name__ == '__main__':
     parser.add_argument("--conv", type=str, default="high", choices={'high', 'low', 'gather', 'seg'})
     parser.add_argument("--hdim", type=int, default=16)
     parser.add_argument("--fanout", type=int, nargs=2, default=[16, 16])
-    parser.add_argument("--batch_size", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=100)
     parser.add_argument("--epoch", type=int, default=110)
     parser.add_argument("--sample", type=str, default="cpu", choices=["cpu", "gpu"])
     parser.add_argument("--indim", type=int, default=16)
@@ -340,7 +350,7 @@ if __name__ == '__main__':
     # create RGCN model
     num_nodes = g.num_nodes()
     out_size = data.num_classes
-    model = RGCN(num_nodes, args.indim, args.hdim, out_size, num_rels, args.conv).to(gpu_device)
+    model = RGCN(num_nodes, args.indim, args.hdim, out_size, gpu_device, num_rels, args.conv).to(gpu_device)
     train(args, gpu_device, g, target_idx, labels, train_mask, model, inv_target)
 
     # test_idx = torch.nonzero(test_mask, as_tuple=False).squeeze()

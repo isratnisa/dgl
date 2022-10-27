@@ -212,10 +212,12 @@ class RGCN(nn.Module):
                 in_dim,
                 h_dim,
                 out_dim,
+                device,
                 num_rels,
                 conv):
         super().__init__()
-        self.emb = nn.Embedding(num_nodes, in_dim)
+        # self.emb = nn.Embedding(num_nodes, in_dim)
+        self.emb = torch.randn(num_nodes, in_dim).to(device)
         if conv == 'high':
             print(f'Using high-mem Conv')
             self.conv1 = RGCNHighMemConv(in_dim, h_dim, num_rels)
@@ -234,7 +236,7 @@ class RGCN(nn.Module):
             self.conv2 = RGCNGatherMMConv(h_dim, out_dim, num_rels)
 
     def forward(self, g):
-        x = self.emb.weight
+        x = self.emb
         h = F.relu(self.conv1(g, x, g.edata[dgl.ETYPE], g.edata['norm']))
         h = self.conv2(g, h, g.edata[dgl.ETYPE], g.edata['norm'])
         return h
@@ -274,7 +276,7 @@ if __name__ == '__main__':
     parser.add_argument("--dataset", type=str, default="aifb",
                         help="Dataset name ('aifb', 'mutag', 'bgs', 'am').")
     parser.add_argument("--conv", type=str, default="high", choices={'high', 'low', 'gather', 'seg'})
-    parser.add_argument("--indim", type=int, default=16)
+    parser.add_argument("--in-dim", type=int, default=16)
     parser.add_argument("--hdim", type=int, default=16)
     parser.add_argument("--epoch", type=int, default=110)
     args = parser.parse_args()
@@ -310,7 +312,7 @@ if __name__ == '__main__':
     # create RGCN model    
     num_nodes = g.num_nodes()
     out_size = data.num_classes
-    model = RGCN(num_nodes, args.indim, args.hdim, out_size, num_rels, args.conv).to(device)
+    model = RGCN(num_nodes, args.in_dim, args.hdim, out_size, device, num_rels, args.conv).to(device)
     
     train(args, g, target_idx, labels, train_mask, model)
     # acc = evaluate(g, target_idx, labels, test_mask, model)
