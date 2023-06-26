@@ -340,12 +340,15 @@ class DistSparseGradOptimizer(abc.ABC):
                             self._world_size
                         )
                     )
-                    alltoall_cpu(
-                        self._rank,
-                        self._world_size,
-                        gather_list,
-                        idx_split_size,
-                    )
+                    if th.distributed.get_backend() == "nccl":
+                        th.distributed.all_to_all(gather_list, idx_split_size)
+                    else:
+                        alltoall_cpu(
+                            self._rank,
+                            self._world_size,
+                            gather_list,
+                            idx_split_size,
+                        )
                     # use cpu until we have GPU alltoallv
                     idx_gather_list = [
                         th.empty((int(num_emb),), dtype=idics.dtype)
