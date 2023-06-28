@@ -256,10 +256,16 @@ class DistSparseGradOptimizer(abc.ABC):
         of the embeddings involved in a mini-batch to DGL's servers and update the embeddings.
         """
         with th.no_grad():
-            dev = "cuda" if th.distributed.get_backend() == "nccl" else "cpu"
+            trainers_per_machine = self._world_size // max(
+                1, dgl.distributed.get_num_machines()
+            )
+            local_rank = self._rank % trainers_per_machine
+            dev = 'cuda:{}'.format(local_rank) \
+                if th.distributed.get_backend() == "nccl" else "cpu"
+            th.cuda.set_device(dev)
             local_indics = {emb.name: [] for emb in self._params}
             local_grads = {emb.name: [] for emb in self._params}
-            device = th.device("cpu")
+            device = dev #th.device("cpu")
             for emb in self._params:
                 name = emb.weight.name
                 kvstore = emb.weight.kvstore
