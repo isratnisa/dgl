@@ -12,7 +12,7 @@ from .... import backend as F
 from ...dist_tensor import DistTensor
 from ...graph_partition_book import EDGE_PART_POLICY, NODE_PART_POLICY
 from ...nn.pytorch import DistEmbedding
-from .utils import alltoall_cpu, alltoallv_cpu
+from .utils import alltoall_cpu, alltoallv_cpu, alltoallv
 
 EMB_STATES = "emb_states"
 WORLD_SIZE = "world_size"
@@ -256,7 +256,13 @@ class DistSparseGradOptimizer(abc.ABC):
         of the embeddings involved in a mini-batch to DGL's servers and update the embeddings.
         """
         with th.no_grad():
-            dev = "cuda" if th.distributed.get_backend() == "nccl" else "cpu"
+            trainers_per_machine = self._world_size // max(
+                1, dgl.distributed.get_num_machines()
+            )
+            local_rank = self._rank % trainers_per_machine
+            dev = 'cuda:{}'.format(local_rank) \
+                if th.distributed.get_backend() == "nccl" else "cpu"
+            th.cuda.set_device(dev)
             local_indics = {emb.name: [] for emb in self._params}
             local_grads = {emb.name: [] for emb in self._params}
             device = dev #th.device("cpu")
@@ -358,19 +364,12 @@ class DistSparseGradOptimizer(abc.ABC):
                         th.empty((int(num_emb),), dtype=idics.dtype, device=dev)
                         for num_emb in gather_list
                     ]
-
-                    if th.distributed.get_backend() == "nccl":
-                        idics_list = [
-                            tensor.to(th.device(dev)) for tensor in idics_list
-                        ]
-                        th.distributed.all_to_all(idx_gather_list, idics_list)
-                    else:
-                        alltoallv_cpu(
-                            self._rank,
-                            self._world_size,
-                            idx_gather_list,
-                            idics_list,
-                        )
+                    alltoallv(
+                        self._rank,
+                        self._world_size,
+                        idx_gather_list,
+                        idics_list,
+                    )
                     local_indics[name] = idx_gather_list
                     grad_gather_list = [
                         th.empty(
@@ -378,18 +377,12 @@ class DistSparseGradOptimizer(abc.ABC):
                         )
                         for num_emb in gather_list
                     ]
-                    if th.distributed.get_backend() == "nccl":
-                        grad_list = [
-                            tensor.to(th.device(dev)) for tensor in grad_list
-                        ]
-                        th.distributed.all_to_all(grad_gather_list, grad_list)
-                    else:
-                        alltoallv_cpu(
-                            self._rank,
-                            self._world_size,
-                            grad_gather_list,
-                            grad_list,
-                        )
+                    alltoallv(
+                        self._rank,
+                        self._world_size,
+                        grad_gather_list,
+                        grad_list,
+                    )
                     local_grads[name] = grad_gather_list
                 else:
                     local_indics[name] = [idics]
