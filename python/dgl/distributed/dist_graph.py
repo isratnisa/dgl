@@ -7,6 +7,7 @@ from collections import namedtuple
 from collections.abc import MutableMapping
 
 import numpy as np
+import torch
 
 from .. import backend as F, heterograph_index
 from .._ffi.ndarray import empty_shared_mem
@@ -590,6 +591,7 @@ class DistGraph:
                 rpc.recv_response()
             self._client.barrier()
 
+        self._wg_init = False
         self._init_ndata_store()
         self._init_edata_store()
 
@@ -616,6 +618,63 @@ class DistGraph:
             self._gpb = gpb
         self._client.map_shared_data(self._gpb)
 
+    def wg_features(self, dist_tensor, rank, num_ranks):
+        print(f'dist_tensor={dist_tensor.shape}')
+        import pylibwholegraph.torch as wgth
+        from pylibwholegraph.torch.tensor import WholeMemoryTensor
+        import pylibwholegraph.binding.wholememory_binding as wmb
+
+        if not self._wg_init:
+            class options: pass
+            options.launch_agent = 'pytorch'
+            options.launch_env_name_world_rank = 'RANK'
+            options.launch_env_name_world_size = 'WORLD_SIZE'
+            options.launch_env_name_local_rank = 'LOCAL_RANK'
+            options.launch_env_name_local_size = 'LOCAL_WORLD_SIZE'
+            options.launch_env_name_master_addr = 'MASTER_ADDR'
+            options.launch_env_name_master_port = 'MASTER_PORT'
+            options.local_rank = rank % role.get_num_trainers()
+            options.local_size = role.get_num_trainers()
+
+            wgth.distributed_launch(options, lambda: None)
+            wmb.init(0)
+            torch.set_num_threads(1)
+            wgth.comm.set_world_info(rank, num_ranks, options.local_rank, options.local_size)
+            self._wg_init = True
+        global_comm = wgth.comm.get_global_communicator()
+
+        feature_comm = global_comm
+        embedding_wholememory_type = 'distributed'
+        embedding_wholememory_location = 'cpu'
+        cache_policy = wgth.create_builtin_cache_policy(
+            "none", # cache type
+            embedding_wholememory_type,
+            embedding_wholememory_location,
+            "readonly", # access type
+            0.0, # cache ratio
+        )
+        node_feat_wm_embedding = wgth.create_embedding(
+            feature_comm,
+            embedding_wholememory_type,
+            embedding_wholememory_location,
+            torch.float,
+            dist_tensor.shape,
+            optimizer=None,
+            cache_policy=cache_policy,
+        )
+        local_tensor, _ = node_feat_wm_embedding.get_embedding_tensor().get_local_tensor(host_view=True)
+        print(f'local tensor={local_tensor.shape} device={local_tensor.device}')
+        subpart_size = -(dist_tensor.shape[0] // -num_ranks)
+        l = rank*subpart_size
+        u = (rank+1)*subpart_size
+        torch.cuda.nvtx.range_push('Copy CPU tensor')
+        if rank == num_ranks - 1:
+            local_tensor.copy_(dist_tensor[l:dist_tensor.shape[0]])
+        else:
+            local_tensor.copy_(dist_tensor[l:u])
+        torch.cuda.nvtx.range_pop()
+        return node_feat_wm_embedding
+
     def _init_ndata_store(self):
         """Initialize node data store."""
         self._ndata_store = {}
@@ -636,6 +695,10 @@ class DistGraph:
                     part_policy=policy,
                     attach=False,
                 )
+                if name.get_name() == 'feat' and torch.distributed.is_initialized():
+                    print('Allocate features with Wholegraph')
+                    part = self.wg_features(data[name.get_name()], torch.distributed.get_rank(), torch.distributed.get_world_size())
+                    data[name.get_name()] = part
             if len(self.ntypes) == 1:
                 self._ndata_store = data
             else:

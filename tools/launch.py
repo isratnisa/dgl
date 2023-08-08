@@ -120,7 +120,7 @@ def execute_remote(
         ip_prefix += "{username}@".format(username=username)
 
     # Construct ssh command that executes `cmd` on the remote host
-    ssh_cmd = "ssh -o StrictHostKeyChecking=no -p {port} {ip_prefix}{ip} '{cmd}'".format(
+    ssh_cmd = "ssh -o StrictHostKeyChecking=no -p {port} {ip_prefix}{ip} 'ulimit -n 1000000; {cmd}'".format(
         port=str(port),
         ip_prefix=ip_prefix,
         ip=ip,
